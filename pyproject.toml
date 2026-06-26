@@ -1,0 +1,10 @@
+[project]
+name = "tradebot"
+version = "0.1.0"
+description = "Personal spot crypto trading bot for Binance (backtest / paper / live)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

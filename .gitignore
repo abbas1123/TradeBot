@@ -1,0 +1,29 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime state & data
+data_store/
+logs/
+*.log
+*.jsonl
+state.json
+*.tmp
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

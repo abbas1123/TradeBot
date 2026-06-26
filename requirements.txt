@@ -1,0 +1,12 @@
+ccxt
+pandas
+numpy
+python-dotenv
+loguru
+apscheduler
+matplotlib
+rich
+pydantic
+pydantic-settings
+pyarrow
+pytest
