@@ -7,9 +7,10 @@ interlock refuses to boot in dangerous combinations (e.g. live mode with testnet
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Mode(str, Enum):
@@ -36,7 +37,8 @@ class Settings(BaseSettings):
     # --- runtime ---
     mode: Mode = Field(default=Mode.BACKTEST, alias="MODE")
     exchange: str = Field(default="binance", alias="EXCHANGE")
-    pairs: list[str] = Field(default_factory=lambda: ["BTC/USDT"], alias="PAIRS")
+    # NoDecode: don't JSON-parse the env value; our validator splits a plain/comma string
+    pairs: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["BTC/USDT"], alias="PAIRS")
     timeframe: str = Field(default="1d", alias="TIMEFRAME")
     strategy: str = Field(default="donchian", alias="STRATEGY")
 
