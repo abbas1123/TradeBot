@@ -42,7 +42,7 @@ REGIMES = {
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradingbot")
-    p.add_argument("--mode", choices=["backtest", "replay", "simulate", "serve", "optimize", "status", "paper", "live"], default="backtest")
+    p.add_argument("--mode", choices=["backtest", "replay", "simulate", "serve", "optimize", "validate", "status", "paper", "live"], default="backtest")
     p.add_argument("--once", action="store_true", help="single iteration (paper/live)")
     p.add_argument("--symbol", default=None, help="e.g. BTC/USDT")
     p.add_argument("--symbols", default=None, help="serve: comma list, or 'auto' for top-volume coins")
@@ -273,6 +273,8 @@ def run_serve(settings, args, logger):
 
     info = {"strategy": strat_name, "timeframe": timeframe, "mode": f"serve/{args.source}", "status": "starting..."}
     monitor = Monitor(engine, info)
+    from src.utils.notify import Notifier
+    notifier = Notifier(settings)
     duration_sec = int(args.duration * 60) if args.duration else 0
     monitor.session_total = duration_sec
 
@@ -301,6 +303,7 @@ def run_serve(settings, args, logger):
         def loop():
             monitor.start_session()
             ohlcv_due = {s: 0.0 for s in symbols}
+            n_ticks = 0
             while True:
                 now = time.time()
                 # (a) one batched tickers call -> update marks + real-time risk (liq/stop)
@@ -328,6 +331,15 @@ def run_serve(settings, args, logger):
                 else:
                     info["status"] = f"live · {len(symbols)} coins · {len(engine.positions)} positions open"
                 monitor.record()
+                n_ticks += 1
+                if notifier.enabled and n_ticks % 60 == 0:  # periodic Telegram position report
+                    rows = []
+                    for sym in symbols:
+                        p = engine.positions.get(sym)
+                        if p:
+                            mk = engine.marks.get(sym, p.entry_price)
+                            rows.append((sym, p.side, p.entry_price, mk, p.unrealized(mk)))
+                    notifier.report(engine.equity(), engine.cash, rows, extra=f"{len(engine.positions)} open")
                 if duration_sec and (time.time() - monitor.session_start) >= duration_sec:
                     info["status"] = f"session complete ({args.duration:.0f} min) · final equity {engine.equity():,.2f}"
                     engine.save()
@@ -335,6 +347,69 @@ def run_serve(settings, args, logger):
                 time.sleep(args.poll)
 
     serve(monitor, loop, host="127.0.0.1", port=args.port, open_browser=args.open, logger=logger)
+
+
+def run_validate(settings, args, logger):
+    """The decisive pre-real-money test: beat buy&hold/DCA, survive 2x costs, MC range."""
+    import dataclasses
+
+    from src.backtest.portfolio_backtest import run_portfolio_backtest
+    from src.backtest.validate import buy_hold_return, dca_return, monte_carlo
+
+    _, timeframe, _, exchange, fetcher, cfg = _common(settings, args)
+    strat_name = args.strategy or "regime"
+    if args.symbols and args.symbols.lower() != "auto":
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    elif args.symbol:
+        symbols = [args.symbol.upper()]
+    else:
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000
+    dfs = {}
+    for s in symbols:
+        d = _slice(fetcher.fetch_ohlcv(s, timeframe, use_cache=not args.refresh_data), args.start, args.end, 0, tf_ms)
+        if not d.empty:
+            dfs[s] = d
+    if not dfs:
+        logger.error("No data; aborting.")
+        return
+    init = cfg.initial_capital
+    logger.info(f"Validating {strat_name} on {', '.join(dfs)} {timeframe} x{args.leverage:g} ...")
+
+    _, trades, m, _ = run_portfolio_backtest(list(dfs), strat_name, settings, cfg, args.leverage, dfs)
+    strat_ret = m["total_return"]
+    bh = buy_hold_return(dfs, init)
+    dca = dca_return(dfs, init)
+
+    cfg2 = dataclasses.replace(cfg, fee_rate=cfg.fee_rate * 2, slippage_bps=cfg.slippage_bps * 2)
+    _, _, m2, _ = run_portfolio_backtest(list(dfs), strat_name, settings, cfg2, args.leverage, dfs)
+    cost_ret = m2["total_return"]
+    mc = monte_carlo(trades, init)
+
+    def pct(x):
+        return f"{x*100:+.2f}%"
+
+    print("\n================  PRE-REAL-MONEY VALIDATION  ================")
+    print(f"Strategy ({strat_name} x{args.leverage:g}):  return {pct(strat_ret)}  maxDD {pct(m['max_drawdown'])}  Sharpe {m.get('sharpe', float('nan')):.2f}  trades {m['num_trades']}")
+    print("\n-- vs honest alternatives (same period) --")
+    print(f"  Buy & hold:   {pct(bh)}   -> strategy {'BEATS' if strat_ret > bh else 'LOSES TO'} buy & hold")
+    print(f"  DCA (weekly): {pct(dca)}   -> strategy {'BEATS' if strat_ret > dca else 'LOSES TO'} DCA")
+    print("\n-- cost stress (2x fees + 2x slippage) --")
+    print(f"  return at 2x costs: {pct(cost_ret)}   -> edge {'SURVIVES' if cost_ret > 0 else 'DIES'} higher costs")
+    if mc:
+        print("\n-- Monte Carlo (bootstrap of trades, range of outcomes) --")
+        print(f"  median {pct(mc['median_return'])} | 5th pct {pct(mc['p05_return'])} | 95th pct {pct(mc['p95_return'])}")
+        print(f"  probability of profit: {mc['prob_profit']*100:.0f}%   median maxDD {pct(-mc['median_maxdd'])}   bad-case maxDD {pct(-mc['p95_maxdd'])}")
+    # verdict
+    checks = [strat_ret > bh, strat_ret > dca, cost_ret > 0, (mc.get("prob_profit", 0) > 0.6)]
+    passed = sum(checks)
+    print("\n-- VERDICT --")
+    print(f"  {passed}/4 checks passed (beats B&H, beats DCA, survives 2x costs, MC>60% profit)")
+    if passed >= 3:
+        print("  -> Reasonable edge. Still paper-trade for weeks before any real money.")
+    else:
+        print("  -> WEAK/NO edge. The honest move is DCA, not this bot. Do NOT go live.")
+    print("============================================================\n")
 
 
 def run_optimize(settings, args, logger):
@@ -417,7 +492,7 @@ def main(argv=None):
     overrides = {"strategy": args.strategy, "timeframe": args.timeframe}
     if args.risk:
         overrides["risk_per_trade_pct"] = args.risk
-    if args.mode in ("backtest", "replay", "simulate", "serve", "optimize", "status"):
+    if args.mode in ("backtest", "replay", "simulate", "serve", "optimize", "validate", "status"):
         overrides["mode"] = "backtest"  # keyless analysis/sim — dry-run engine
         overrides["live_capital_cap"] = 1e12  # fake balance fully usable in paper modes
         if args.mode == "serve":
@@ -447,6 +522,8 @@ def main(argv=None):
             run_serve(settings, args, logger)
         elif args.mode == "optimize":
             run_optimize(settings, args, logger)
+        elif args.mode == "validate":
+            run_validate(settings, args, logger)
         elif args.mode == "status":
             run_status(settings, args, logger)
         elif args.mode in ("paper", "live"):

@@ -81,6 +81,7 @@ def run_once(ctx) -> None:
     _reconcile(ctx)
     capital = ctx.broker.free_quote()
     warmup = ctx.strategy.warmup_bars
+    marks: dict = {}
 
     for symbol in s.pairs:
         try:
@@ -89,6 +90,7 @@ def run_once(ctx) -> None:
                 continue
             bar = df.iloc[-1]
             ts, c = bar["timestamp"], float(bar["close"])
+            marks[symbol] = c
 
             last_ts = st.last_processed_ts.get(symbol)
             if last_ts and pd.Timestamp(last_ts) >= ts:
@@ -151,6 +153,15 @@ def run_once(ctx) -> None:
                 st.kill_switch_active = True
                 st.kill_switch_reason = ctx.risk.kill_reason
                 ctx.state.save()
+
+    # Telegram position snapshot at the end of the iteration
+    if ctx.notifier.enabled:
+        rows = []
+        for sym, p in st.open_positions.items():
+            mk = marks.get(sym, p["entry_price"])
+            rows.append((sym, "LONG", p["entry_price"], mk, (mk - p["entry_price"]) * p["quantity"]))
+        eq = capital + sum(r[4] for r in rows)
+        ctx.notifier.report(eq, capital, rows, extra=f"dayPnL {st.realized_daily_pnl:+.2f}")
 
 
 def run_loop(ctx) -> None:

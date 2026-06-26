@@ -158,6 +158,11 @@ python main.py --mode backtest --strategy regime --leverage 3 --start 2023-01-01
 # Walk-forward parameter search (grid on TRAIN, validated OUT-OF-SAMPLE):
 python main.py --mode optimize --symbol BTC/USDT --strategy regime
 #   -> if out-of-sample is much worse than train, the params are overfit. Don't trust them.
+
+# THE decisive pre-real-money test (does it beat the honest alternatives?):
+python main.py --mode validate --symbols "BTC/USDT,ETH/USDT" --strategy regime
+#   -> strategy vs buy&hold vs DCA, 2x-cost stress, Monte Carlo outcome range, 4-check verdict.
+#      If it can't beat buy&hold/DCA after costs, the honest move is DCA, not the bot.
 ```
 
 ## Safety & monitoring (live modes)
@@ -165,8 +170,9 @@ python main.py --mode optimize --symbol BTC/USDT --strategy regime
 - **Max-drawdown breaker** (`MAX_DRAWDOWN_PCT`) and daily-loss halt auto-trip the kill switch.
 - **Exchange reconciliation** clears stale positions if state and the exchange disagree.
 - **Total-exposure cap** (`MAX_TOTAL_EXPOSURE`) limits correlated risk across coins.
-- **Telegram alerts** on every trade and kill — set `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID`
-  in `.env` (optional; silent no-op if unset).
+- **Telegram alerts** on every trade and kill, **plus periodic position/equity reports**
+  (open positions, entry→mark, PnL) — set `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` in `.env`
+  (optional; silent no-op if unset).
 
 ## Tests
 

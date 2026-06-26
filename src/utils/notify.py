@@ -31,3 +31,20 @@ class Notifier:
     def notify(self, text: str) -> None:
         if self.enabled:
             send_telegram(self.token, self.chat_id, text)
+
+    def report(self, equity: float, cash: float, rows: list, extra: str = "") -> None:
+        """Send a position/equity snapshot. rows: list of (symbol, side, entry, mark, unreal)."""
+        if self.enabled:
+            send_telegram(self.token, self.chat_id, format_report(equity, cash, rows, extra))
+
+
+def format_report(equity: float, cash: float, rows: list, extra: str = "") -> str:
+    lines = [f"📊 Equity {equity:,.2f} USDT" + (f"  ({extra})" if extra else "")]
+    lines.append(f"Cash {cash:,.2f}")
+    if rows:
+        for sym, side, entry, mark, unreal in rows:
+            arrow = "▲" if unreal >= 0 else "▼"
+            lines.append(f"{arrow} {sym} {side} @ {entry:,.4g} → {mark:,.4g}  {unreal:+.2f}")
+    else:
+        lines.append("No open positions (flat / in cash)")
+    return "\n".join(lines)
