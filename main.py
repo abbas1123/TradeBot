@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--watch", action=argparse.BooleanOptionalAction, default=True, help="live dashboard (use --no-watch for plain text)")
     p.add_argument("--speed", type=float, default=30.0, help="replay bars per second")
     p.add_argument("--poll", type=float, default=5.0, help="simulate poll interval seconds")
+    p.add_argument("--report-min", type=float, default=30.0, help="serve: Telegram heartbeat report interval (minutes)")
     p.add_argument("--max-ticks", type=int, default=0, help="simulate: stop after N polls (0=run forever)")
     p.add_argument("--capital", type=float, default=None, help="override starting fake balance")
     p.add_argument("--state", default="data_store/sim_state.json", help="simulation state file")
@@ -210,8 +211,17 @@ def run_futures_backtest(settings, args, logger):
         logger.warning(f"plot skipped: {e}")
 
 
+def _warn_long_only(strat_name, logger):
+    if strat_name in ("regime", "donchian_futures", "futures", "mean_reversion"):
+        logger.warning(
+            f"'{strat_name}' uses shorts, but replay/simulate is LONG-ONLY (SimEngine) and "
+            f"drops SHORT/COVER. Use --mode serve for full long/short."
+        )
+
+
 def run_replay_mode(settings, args, logger):
     symbol, timeframe, strat_name, exchange, fetcher, cfg = _common(settings, args)
+    _warn_long_only(strat_name, logger)
     logger.info(f"Fetching OHLCV {symbol} {timeframe} for replay ...")
     df = fetcher.fetch_ohlcv(symbol, timeframe, use_cache=not args.refresh_data)
     strategy = get_strategy(strat_name, settings)
@@ -227,6 +237,7 @@ def run_replay_mode(settings, args, logger):
 
 def run_simulate_mode(settings, args, logger):
     symbol, timeframe, strat_name, exchange, fetcher, cfg = _common(settings, args)
+    _warn_long_only(strat_name, logger)
     strategy = get_strategy(strat_name, settings)
     engine = SimEngine(strategy, RiskManager(settings), cfg, symbol, state_path=args.state)
     if not args.reset and engine.load():
@@ -303,7 +314,8 @@ def run_serve(settings, args, logger):
         def loop():
             monitor.start_session()
             ohlcv_due = {s: 0.0 for s in symbols}
-            n_ticks = 0
+            last_report = 0.0
+            last_ev = 0
             while True:
                 now = time.time()
                 # (a) one batched tickers call -> update marks + real-time risk (liq/stop)
@@ -331,15 +343,23 @@ def run_serve(settings, args, logger):
                 else:
                     info["status"] = f"live · {len(symbols)} coins · {len(engine.positions)} positions open"
                 monitor.record()
-                n_ticks += 1
-                if notifier.enabled and n_ticks % 60 == 0:  # periodic Telegram position report
-                    rows = []
-                    for sym in symbols:
-                        p = engine.positions.get(sym)
-                        if p:
-                            mk = engine.marks.get(sym, p.entry_price)
-                            rows.append((sym, p.side, p.entry_price, mk, p.unrealized(mk)))
-                    notifier.report(engine.equity(), engine.cash, rows, extra=f"{len(engine.positions)} open")
+                if notifier.enabled:
+                    # (i) bilingual trade alerts — forward new BUY/SHORT/SELL/COVER/LIQ events
+                    evs = list(engine.events)
+                    for e in evs[last_ev:]:
+                        if any(k in e for k in ("BUY", "SHORT", "SELL", "COVER", "LIQUIDATED")):
+                            notifier.notify("🔔 Əməliyyat / Trade:\n" + e)
+                    last_ev = len(evs)
+                    # (ii) periodic bilingual position/equity heartbeat
+                    if now - last_report >= args.report_min * 60:
+                        rows = []
+                        for sym in symbols:
+                            p = engine.positions.get(sym)
+                            if p:
+                                mk = engine.marks.get(sym, p.entry_price)
+                                rows.append((sym, p.side, p.entry_price, mk, p.unrealized(mk)))
+                        notifier.report(engine.equity(), engine.cash, rows, extra=f"{len(engine.positions)} açıq / open")
+                        last_report = now
                 if duration_sec and (time.time() - monitor.session_start) >= duration_sec:
                     info["status"] = f"session complete ({args.duration:.0f} min) · final equity {engine.equity():,.2f}"
                     engine.save()
@@ -430,7 +450,7 @@ def run_optimize(settings, args, logger):
         logger.error("No data; aborting.")
         return
     cut = min(int(len(d) * 0.7) for d in full.values())
-    warm = 220
+    warm = get_strategy(strat_name, settings).warmup_bars  # exact pad -> no train bars leak into test metrics
     train = {s: d.iloc[:cut].reset_index(drop=True) for s, d in full.items()}
     test = {s: d.iloc[max(0, cut - warm):].reset_index(drop=True) for s, d in full.items()}
 
@@ -510,7 +530,8 @@ def main(argv=None):
     try:
         if args.mode == "backtest":
             futures_strats = {"donchian_futures", "futures", "regime", "mean_reversion"}
-            if (args.strategy in futures_strats) or args.leverage > 1:
+            eff_strat = args.strategy or settings.strategy  # honour STRATEGY env, not just --strategy
+            if (eff_strat in futures_strats) or args.leverage > 1:
                 run_futures_backtest(settings, args, logger)
             else:
                 run_backtest(settings, args, logger)

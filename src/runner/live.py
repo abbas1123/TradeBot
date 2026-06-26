@@ -28,7 +28,11 @@ def build_context(settings):
     risk = RiskManager(settings)
     broker = Broker(settings, risk)
     fetcher = Fetcher(broker.exchange, cache_dir=None)
-    strategy = get_strategy(settings.strategy or "donchian", settings)
+    strat_name = settings.strategy or "donchian"
+    if strat_name in ("regime", "donchian_futures", "futures", "mean_reversion"):
+        logger.warning(f"'{strat_name}' uses shorts, but spot cannot short — live/paper runs LONG-ONLY 'donchian'.")
+        strat_name = "donchian"
+    strategy = get_strategy(strat_name, settings)
     state = StateStore(settings.state_path)
     notifier = Notifier(settings)
     return SimpleNamespace(
@@ -73,13 +77,16 @@ def _check_drawdown(ctx) -> None:
 def run_once(ctx) -> None:
     s, st, log = ctx.settings, ctx.state.state, ctx.logger
     ctx.state.reset_daily_if_needed()
-    # restore kill state from disk
+    # restore risk state from disk so daily-loss / error / kill breakers persist across runs
+    ctx.risk.realized_daily_pnl = st.realized_daily_pnl
+    ctx.risk.consecutive_errors = st.consecutive_errors
     if st.kill_switch_active:
         ctx.risk.manual_kill = True
         ctx.risk.kill_reason = st.kill_switch_reason or "persisted"
 
     _reconcile(ctx)
     capital = ctx.broker.free_quote()
+    available = capital  # decremented as positions open this run (prevents over-allocation)
     warmup = ctx.strategy.warmup_bars
     marks: dict = {}
 
@@ -113,7 +120,9 @@ def run_once(ctx) -> None:
                     approved = ctx.risk.approve_exit(symbol, pos["quantity"])
                     fill = ctx.broker.place_order(approved, c)
                     if fill.status == "filled":
-                        pnl = (fill.avg_price - pos["entry_price"]) * fill.filled_qty - fill.fee
+                        entry_fee = pos["entry_price"] * fill.filled_qty * ctx.broker.fee_rate
+                        pnl = (fill.avg_price - pos["entry_price"]) * fill.filled_qty - fill.fee - entry_fee
+                        available += fill.avg_price * fill.filled_qty - fill.fee  # cash freed by the sale
                         st.realized_daily_pnl += pnl
                         st.cumulative_pnl += pnl
                         del st.open_positions[symbol]
@@ -126,12 +135,13 @@ def run_once(ctx) -> None:
                         log.warning(f"{symbol}: exit not filled ({fill.status})")
             elif sig.action == Action.BUY and not ctx.risk.is_killed:
                 approved = ctx.risk.approve_entry(
-                    symbol, c, sig.stop_price, capital, st.open_positions,
+                    symbol, c, sig.stop_price, available, st.open_positions,
                     min_notional=filters.min_notional, lot_step=filters.step_size,
                 )
                 if isinstance(approved, ApprovedOrder):
                     fill = ctx.broker.place_order(approved, c)
                     if fill.status == "filled":
+                        available -= fill.cost + fill.fee  # cash committed to this position
                         st.open_positions[symbol] = vars(
                             Position(symbol, fill.filled_qty, fill.avg_price, sig.stop_price, ts.isoformat())
                         )
@@ -143,16 +153,21 @@ def run_once(ctx) -> None:
                 else:
                     log.info(f"{symbol}: entry rejected ({approved.reason})")
 
+            ctx.risk.record_success()
+            st.consecutive_errors = ctx.risk.consecutive_errors
+            if ctx.risk.is_killed:  # e.g. daily-loss trip inside register_pnl
+                st.kill_switch_active = True
+                st.kill_switch_reason = ctx.risk.kill_reason
             st.last_processed_ts[symbol] = ts.isoformat()
             ctx.state.save()
-            ctx.risk.record_success()
         except Exception as e:  # one bad pair must not break the others
             ctx.risk.record_error()
+            st.consecutive_errors = ctx.risk.consecutive_errors
             log.error(f"{symbol}: error {e}")
             if ctx.risk.is_killed:
                 st.kill_switch_active = True
                 st.kill_switch_reason = ctx.risk.kill_reason
-                ctx.state.save()
+            ctx.state.save()
 
     # Telegram position snapshot at the end of the iteration
     if ctx.notifier.enabled:

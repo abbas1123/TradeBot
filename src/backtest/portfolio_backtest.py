@@ -15,12 +15,12 @@ from .backtester import BTConfig, compute_metrics
 
 
 def _align(dfs: dict) -> dict:
-    """Trim all symbols to a common start so positional index == same date across coins."""
+    """Trim all symbols to a common start AND common length so positional index == the same
+    date across coins, and every consumer (strategy + benchmarks) measures the same window."""
     common_start = max(d["timestamp"].iloc[0] for d in dfs.values())
-    out = {}
-    for s, d in dfs.items():
-        out[s] = d[d["timestamp"] >= common_start].reset_index(drop=True)
-    return out
+    out = {s: d[d["timestamp"] >= common_start].reset_index(drop=True) for s, d in dfs.items()}
+    n = min((len(d) for d in out.values()), default=0)
+    return {s: d.iloc[:n].reset_index(drop=True) for s, d in out.items()}
 
 
 def run_portfolio_backtest(symbols, strat_name, settings, cfg: BTConfig, leverage, dfs: dict):

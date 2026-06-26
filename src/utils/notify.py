@@ -39,12 +39,14 @@ class Notifier:
 
 
 def format_report(equity: float, cash: float, rows: list, extra: str = "") -> str:
-    lines = [f"📊 Equity {equity:,.2f} USDT" + (f"  ({extra})" if extra else "")]
-    lines.append(f"Cash {cash:,.2f}")
+    """Bilingual (AZ/EN) position + equity snapshot for Telegram."""
+    lines = [f"📊 Balans / Equity: {equity:,.2f} USDT" + (f"  ({extra})" if extra else "")]
+    lines.append(f"💵 Boş nağd / Free cash: {cash:,.2f}")
     if rows:
+        lines.append("📈 Açıq mövqelər / Open positions:")
         for sym, side, entry, mark, unreal in rows:
-            arrow = "▲" if unreal >= 0 else "▼"
-            lines.append(f"{arrow} {sym} {side} @ {entry:,.4g} → {mark:,.4g}  {unreal:+.2f}")
+            mark_ = "🟢" if unreal >= 0 else "🔴"
+            lines.append(f"{mark_} {sym} {side}  {entry:,.4g}→{mark:,.4g}  PnL {unreal:+.2f}")
     else:
-        lines.append("No open positions (flat / in cash)")
+        lines.append("😴 Mövqe yoxdur / No open positions (flat)")
     return "\n".join(lines)

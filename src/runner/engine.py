@@ -432,10 +432,11 @@ class PortfolioEngine:
             p.funding_paid += pay
             self.funding_total += pay
 
-        # (3) profit-protection trail, then intrabar stop / liquidation / target (per side)
+        # (3) intrabar stop / liquidation / target (per side) FIRST, then ratchet the trail
+        # for the NEXT bar — updating the trail with this bar's high before checking this
+        # bar's low would be optimistic same-bar lookahead.
         p = self.positions.get(symbol)
         if p is not None:
-            self._update_trailing(p, h, l)
             reason = level = fill = None
             if p.side == "LONG":
                 trig = max(p.stop_price, p.liq)
@@ -458,6 +459,8 @@ class PortfolioEngine:
                     reason, fill = "target", min(p.target_price, o) * (1 - slip)
             if reason:
                 self._close(symbol, fill, ts, reason)
+            else:
+                self._update_trailing(p, h, l)  # ratchet for the NEXT bar (no same-bar lookahead)
 
         # (4) decision -> stage for next bar
         sig = self.strategies[symbol].generate_signal(df, self._position_state(symbol))
@@ -517,9 +520,10 @@ class PortfolioEngine:
         liq_fee = (fill * p.qty * self.liq_fee_rate) if reason == "liquidation" else 0.0
         price_pnl = futures.unrealized_pnl(p.side, p.entry_price, p.qty, fill)
         gross_return = p.im + price_pnl - exit_fee - liq_fee
-        if reason == "liquidation":
-            # isolated margin: a liquidation can never lose more than its posted margin
-            # (any gap deficit is absorbed by the insurance fund, not the shared pool)
+        if self.leverage > 1 or reason == "liquidation":
+            # isolated margin: a leveraged position can never lose more than its posted
+            # margin, regardless of how the exit is labelled (a gap through a trailed stop
+            # that sits above the liq price must not drain the shared cash pool)
             gross_return = max(0.0, gross_return)
         self.cash += gross_return
         pnl = gross_return - p.im - p.entry_fee - p.funding_paid

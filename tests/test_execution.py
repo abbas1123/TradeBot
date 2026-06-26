@@ -67,9 +67,18 @@ def test_broker_rejects_forged_token():
         br.place_order(forged, 100.0)
 
 
-def test_broker_skips_below_min_notional():
+def test_broker_skips_entry_below_min_notional():
     rm = RiskManager(_settings())
     br = Broker(_settings(), rm)
-    appr = rm.approve_exit("BTC/USDT", 0.0001)  # tiny -> notional 0.0001 << 5
-    fill = br.place_order(appr, 1.0)
+    appr = rm._mint("BTC/USDT", Side.BUY, 0.0001, reduce_only=False, reason="entry")
+    fill = br.place_order(appr, 1.0)  # notional 0.0001 << 5 -> entry blocked
     assert fill.status.startswith("skipped")
+
+
+def test_broker_exit_bypasses_min_notional():
+    # an exit (reduce_only) must ALWAYS be allowed to close, even tiny dust
+    rm = RiskManager(_settings())
+    br = Broker(_settings(), rm)
+    appr = rm.approve_exit("BTC/USDT", 0.0001)
+    fill = br.place_order(appr, 1.0)
+    assert fill.status == "filled"

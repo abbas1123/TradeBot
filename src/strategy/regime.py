@@ -26,14 +26,23 @@ class RegimeSwitchStrategy(Strategy):
         self.mr = MeanReversionStrategy(params)
         self.warmup_bars = max(self.trend.warmup_bars, self.mr.warmup_bars, self.p.chop_period + 5)
         self.last_regime = "?"
+        self._active = None  # the sub-strategy that owns the current open position
 
     def generate_signal(self, df: pd.DataFrame, position: PositionState) -> Signal:
         ci = choppiness_index(df, self.p.chop_period).iloc[-1]
-        if pd.isna(ci):
-            # not enough data to classify -> default to trend logic (handles its own warmup)
-            return self.trend.generate_signal(df, position)
-        trending = float(ci) < self.p.chop_threshold
-        self.last_regime = "trend" if trending else "range"
-        sub = self.trend if trending else self.mr
+        ci_v = None if pd.isna(ci) else float(ci)
+        trending = (ci_v is None) or (ci_v < self.p.chop_threshold)
+        regime_sub = self.trend if trending else self.mr
+
+        if position.is_flat:
+            self._active = regime_sub  # whoever is in charge when an entry is decided
+            sub = regime_sub
+        else:
+            # an open position is managed by the SAME sub that opened it, so its exit rules
+            # stay coherent even if the regime flips mid-trade
+            sub = self._active or regime_sub
+
+        self.last_regime = "trend" if sub is self.trend else "range"
         sig = sub.generate_signal(df, position)
-        return replace(sig, reason=f"[{self.last_regime} CI={float(ci):.0f}] {sig.reason}")
+        tag = self.last_regime + ("" if ci_v is None else f" CI={ci_v:.0f}")
+        return replace(sig, reason=f"[{tag}] {sig.reason}")

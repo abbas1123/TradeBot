@@ -96,16 +96,19 @@ class Broker:
         qty = floor_to_step(order.quantity, f.step_size)
         if qty <= 0 or qty < f.min_qty:
             return Fill.skipped(order.symbol, order.side, "below_min_qty_after_rounding")
-        if ref_price > 0 and qty * ref_price < f.min_notional:
+        # entries respect MIN_NOTIONAL; exits (reduce_only) must always be allowed to close
+        if ref_price > 0 and not order.reduce_only and qty * ref_price < f.min_notional:
             return Fill.skipped(order.symbol, order.side, "below_min_notional_after_rounding")
 
         if not self._can_place_real_orders:  # dry-run / backtest: simulate
             cost = qty * ref_price
             return Fill(order.symbol, order.side, qty, ref_price, cost * self.fee_rate, cost, "filled")
 
-        params = {"reduceOnly": True} if order.reduce_only else {}
+        # SPOT only: NEVER send reduceOnly (it's a futures-only param and modern ccxt
+        # rejects it on spot, which would reject every exit/stop). The runner already
+        # enforces reduce-only by selling only the held quantity.
         raw = self._with_backoff(
-            self.exchange.create_order, order.symbol, "market", order.side.value, qty, None, params
+            self.exchange.create_order, order.symbol, "market", order.side.value, qty, None, {}
         )
         return self._normalize_fill(raw, order)
 
@@ -137,8 +140,8 @@ class Broker:
                 if attempt == max_attempts - 1:
                     raise
                 sleep = delay
-            except (ccxt.AuthenticationError, ccxt.InsufficientFunds, ccxt.BadSymbol):
-                raise  # do not retry logic errors
+            except (ccxt.AuthenticationError, ccxt.InsufficientFunds, ccxt.BadSymbol, ccxt.InvalidOrder, ccxt.BadRequest):
+                raise  # do not retry order-validation / logic errors
             time.sleep(min(sleep, 60.0))
             delay = min(delay * 2, 60.0)
         raise RuntimeError("broker retries exhausted")
