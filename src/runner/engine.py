@@ -400,7 +400,12 @@ class PortfolioEngine:
                     notional = fill * sized.quantity
                     im = notional / self.leverage
                     fee = notional * fee_rate
-                    if im + fee <= self.cash:
+                    eq = self.equity()
+                    cur_notional = sum(pp.entry_price * pp.qty for pp in self.positions.values())
+                    max_exp = getattr(self.risk.s, "max_total_exposure", 1e9)
+                    if eq > 0 and (cur_notional + notional) / eq > max_exp:
+                        self._log(f"{symbol} entry skip: total exposure cap ({max_exp:g}x)")
+                    elif im + fee <= self.cash:
                         self.cash -= im + fee
                         liq = futures.liquidation_price(side, fill, sized.quantity, self.leverage, notional, fee_rate=fee_rate + self.liq_fee_rate)
                         self.positions[symbol] = LevPosition(

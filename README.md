@@ -147,6 +147,27 @@ stays simulation-only). Orders pass Strategy → `RiskManager.approve_*` (single
 → `Broker` (refuses any unapproved order; floors to lot size; skips below min-notional).
 A mode/testnet interlock refuses to start if keys and `BINANCE_TESTNET` disagree.
 
+## Validate before you trust it (most important)
+
+```powershell
+# Full metrics for the long/short + regime strategy (uses the live engine):
+python main.py --mode backtest --strategy regime --leverage 3 --start 2023-01-01
+#   -> total return, CAGR, max drawdown, Sharpe/Sortino, win rate, profit factor,
+#      liquidations, funding, AND a rolling per-period breakdown (is the edge consistent?)
+
+# Walk-forward parameter search (grid on TRAIN, validated OUT-OF-SAMPLE):
+python main.py --mode optimize --symbol BTC/USDT --strategy regime
+#   -> if out-of-sample is much worse than train, the params are overfit. Don't trust them.
+```
+
+## Safety & monitoring (live modes)
+
+- **Max-drawdown breaker** (`MAX_DRAWDOWN_PCT`) and daily-loss halt auto-trip the kill switch.
+- **Exchange reconciliation** clears stale positions if state and the exchange disagree.
+- **Total-exposure cap** (`MAX_TOTAL_EXPOSURE`) limits correlated risk across coins.
+- **Telegram alerts** on every trade and kill — set `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID`
+  in `.env` (optional; silent no-op if unset).
+
 ## Tests
 
 ```powershell
@@ -154,8 +175,8 @@ pytest
 ```
 
 60 tests: indicators (hand-computed), risk sizing/limits/kill-switch, deterministic
-strategy signals, futures margin/liquidation, the order-approval token gate, and broker
-safety (dry-run, forged-token rejection).
+strategy signals (incl. regime/mean-reversion), futures margin/liquidation/trailing, the
+order-approval token gate, and broker safety (dry-run, forged-token rejection).
 
 ## Status
 

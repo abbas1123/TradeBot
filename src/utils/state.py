@@ -31,6 +31,8 @@ class BotState:
     kill_switch_reason: str = ""
     consecutive_errors: int = 0
     last_processed_ts: dict = field(default_factory=dict)  # symbol -> ISO ts
+    cumulative_pnl: float = 0.0  # realized PnL since inception (for max-drawdown breaker)
+    peak_pnl: float = 0.0  # high-water mark of cumulative_pnl
 
 
 class StateStore:

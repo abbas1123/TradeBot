@@ -42,7 +42,7 @@ REGIMES = {
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradingbot")
-    p.add_argument("--mode", choices=["backtest", "replay", "simulate", "serve", "status", "paper", "live"], default="backtest")
+    p.add_argument("--mode", choices=["backtest", "replay", "simulate", "serve", "optimize", "status", "paper", "live"], default="backtest")
     p.add_argument("--once", action="store_true", help="single iteration (paper/live)")
     p.add_argument("--symbol", default=None, help="e.g. BTC/USDT")
     p.add_argument("--symbols", default=None, help="serve: comma list, or 'auto' for top-volume coins")
@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--end", default=None)
     p.add_argument("--split", default=None, help="in/out-of-sample split date (backtest)")
     p.add_argument("--regime", choices=["bull", "bear", "sideways", "all"], default=None)
+    p.add_argument("--windows", type=int, default=4, help="futures backtest: rolling consistency periods")
     p.add_argument("--refresh-data", action="store_true", help="ignore OHLCV cache")
     # simulation / dashboard
     p.add_argument("--watch", action=argparse.BooleanOptionalAction, default=True, help="live dashboard (use --no-watch for plain text)")
@@ -147,6 +148,66 @@ def run_backtest(settings, args, logger):
         _one(_slice(df, args.split, args.end, warmup, tf_ms), "out_of_sample")
     else:
         _one(_slice(df, args.start, args.end, warmup, tf_ms), "full")
+
+
+def run_futures_backtest(settings, args, logger):
+    """Backtest the long/short futures + regime strategies via the live PortfolioEngine."""
+    from src.backtest.portfolio_backtest import rolling_report, run_portfolio_backtest
+
+    _, timeframe, _, exchange, fetcher, cfg = _common(settings, args)
+    strat_name = args.strategy or "regime"
+    if args.symbols and args.symbols.lower() != "auto":
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    elif args.symbol:
+        symbols = [args.symbol.upper()]
+    else:
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # fast default for backtest
+    logger.info(f"Futures backtest: {', '.join(symbols)} {timeframe} · {strat_name} · {args.leverage:g}x · risk {settings.risk_per_trade_pct}%")
+
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000
+    dfs = {}
+    for s in symbols:
+        d = fetcher.fetch_ohlcv(s, timeframe, use_cache=not args.refresh_data)
+        d = _slice(d, args.start, args.end, 0, tf_ms)
+        if not d.empty:
+            dfs[s] = d
+    if not dfs:
+        logger.error("No data fetched; aborting.")
+        return
+
+    equity, trades, metrics, warmup = run_portfolio_backtest(list(dfs.keys()), strat_name, settings, cfg, args.leverage, dfs)
+    from src.backtest.backtester import format_metrics
+
+    print(format_metrics(metrics, label=f"{strat_name} x{args.leverage:g}"))
+    print(f"  liquidations={metrics.get('liquidations')}  funding_total={metrics.get('funding_total')}")
+    rows = rolling_report(equity, trades, warmup, n_windows=args.windows)
+    if rows:
+        print("--- rolling periods (is the edge consistent across time?) ---")
+        for r in rows:
+            print(f"  {r['from']}..{r['to']}  return={r['return_pct']:+.2f}%  maxDD={r['max_dd_pct']:.2f}%  trades={r['trades']}  sharpe={r['sharpe']}")
+        pos = sum(1 for r in rows if r["return_pct"] > 0)
+        print(f"  -> {pos}/{len(rows)} periods positive  (consistency signal)")
+
+    # save equity curve
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from pathlib import Path
+
+        out = Path("data_store/backtests")
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"futures_{strat_name}_x{args.leverage:g}.png"
+        fig, ax = plt.subplots(figsize=(11, 5))
+        ax.plot(equity.index, equity.values, color="tab:blue")
+        ax.axhline(cfg.initial_capital, ls="--", color="grey", alpha=0.6)
+        ax.set_title(f"{strat_name} x{args.leverage:g} equity")
+        fig.tight_layout()
+        fig.savefig(str(path), dpi=110)
+        plt.close(fig)
+        logger.info(f"Saved equity curve -> {path}")
+    except Exception as e:
+        logger.warning(f"plot skipped: {e}")
 
 
 def run_replay_mode(settings, args, logger):
@@ -276,6 +337,51 @@ def run_serve(settings, args, logger):
     serve(monitor, loop, host="127.0.0.1", port=args.port, open_browser=args.open, logger=logger)
 
 
+def run_optimize(settings, args, logger):
+    """Walk-forward parameter search: grid-search on a TRAIN split, validate on held-out TEST.
+    Picks robust params by return/drawdown — and shows whether they survive out-of-sample."""
+    from src.backtest.portfolio_backtest import run_portfolio_backtest
+
+    _, timeframe, _, exchange, fetcher, cfg = _common(settings, args)
+    strat_name = args.strategy or "regime"
+    symbols = [args.symbol.upper()] if args.symbol else ["BTC/USDT", "ETH/USDT"]
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000
+    full = {}
+    for s in symbols:
+        d = _slice(fetcher.fetch_ohlcv(s, timeframe, use_cache=not args.refresh_data), args.start, args.end, 0, tf_ms)
+        if not d.empty:
+            full[s] = d
+    if not full:
+        logger.error("No data; aborting.")
+        return
+    cut = min(int(len(d) * 0.7) for d in full.values())
+    warm = 220
+    train = {s: d.iloc[:cut].reset_index(drop=True) for s, d in full.items()}
+    test = {s: d.iloc[max(0, cut - warm):].reset_index(drop=True) for s, d in full.items()}
+
+    grid_entry, grid_stop = [10, 20, 30], [1.5, 2.0, 2.5]
+    logger.info(f"Optimizing {strat_name} on {', '.join(full)} — {len(grid_entry)*len(grid_stop)} combos (train), then OOS test ...")
+    rows = []
+    for de in grid_entry:
+        for sm in grid_stop:
+            st2 = settings.model_copy(update={"donchian_entry": de, "atr_stop_mult": sm})
+            _, _, m, _ = run_portfolio_backtest(list(train), strat_name, st2, cfg, args.leverage, train)
+            score = m["total_return"] / (abs(m["max_drawdown"]) + 0.01)
+            rows.append((de, sm, m["total_return"] * 100, m["max_drawdown"] * 100, m.get("sharpe", float("nan")), score))
+    rows.sort(key=lambda r: r[5], reverse=True)
+    print("--- TRAIN grid (sorted by return/drawdown) ---")
+    for de, sm, ret, dd, sh, sc in rows:
+        print(f"  entry={de:>2} stop={sm:>3}xATR  return={ret:+7.2f}%  maxDD={dd:7.2f}%  sharpe={sh:5.2f}")
+    best = rows[0]
+    logger.info(f"Best train params: donchian_entry={best[0]}, atr_stop_mult={best[1]}")
+    st_best = settings.model_copy(update={"donchian_entry": best[0], "atr_stop_mult": best[1]})
+    _, _, mt, _ = run_portfolio_backtest(list(test), strat_name, st_best, cfg, args.leverage, test)
+    from src.backtest.backtester import format_metrics
+
+    print(format_metrics(mt, label=f"OUT-OF-SAMPLE (entry={best[0]}, stop={best[1]})"))
+    print("  ^ if OOS is much worse than train, the params are overfit — do NOT trust them.")
+
+
 def run_live(settings, args, logger):
     """Real spot execution on Binance testnet (paper) or live."""
     from src.runner.live import build_context, run_loop, run_once
@@ -311,8 +417,8 @@ def main(argv=None):
     overrides = {"strategy": args.strategy, "timeframe": args.timeframe}
     if args.risk:
         overrides["risk_per_trade_pct"] = args.risk
-    if args.mode in ("backtest", "replay", "simulate", "serve"):
-        overrides["mode"] = "backtest"  # dry-run engine, no API keys
+    if args.mode in ("backtest", "replay", "simulate", "serve", "optimize", "status"):
+        overrides["mode"] = "backtest"  # keyless analysis/sim — dry-run engine
         overrides["live_capital_cap"] = 1e12  # fake balance fully usable in paper modes
         if args.mode == "serve":
             overrides["max_open_positions"] = 1000
@@ -328,13 +434,19 @@ def main(argv=None):
 
     try:
         if args.mode == "backtest":
-            run_backtest(settings, args, logger)
+            futures_strats = {"donchian_futures", "futures", "regime", "mean_reversion"}
+            if (args.strategy in futures_strats) or args.leverage > 1:
+                run_futures_backtest(settings, args, logger)
+            else:
+                run_backtest(settings, args, logger)
         elif args.mode == "replay":
             run_replay_mode(settings, args, logger)
         elif args.mode == "simulate":
             run_simulate_mode(settings, args, logger)
         elif args.mode == "serve":
             run_serve(settings, args, logger)
+        elif args.mode == "optimize":
+            run_optimize(settings, args, logger)
         elif args.mode == "status":
             run_status(settings, args, logger)
         elif args.mode in ("paper", "live"):

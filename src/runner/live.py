@@ -19,6 +19,7 @@ from ..risk.types import ApprovedOrder
 from ..strategy.base import Action, PositionState
 from ..strategy.registry import get_strategy
 from ..utils.logger import get_logger
+from ..utils.notify import Notifier
 from ..utils.state import Position, StateStore
 
 
@@ -29,10 +30,44 @@ def build_context(settings):
     fetcher = Fetcher(broker.exchange, cache_dir=None)
     strategy = get_strategy(settings.strategy or "donchian", settings)
     state = StateStore(settings.state_path)
+    notifier = Notifier(settings)
     return SimpleNamespace(
         settings=settings, risk=risk, broker=broker, fetcher=fetcher,
-        strategy=strategy, state=state, logger=logger,
+        strategy=strategy, state=state, logger=logger, notifier=notifier,
     )
+
+
+def _reconcile(ctx) -> None:
+    """Clear positions the exchange no longer actually holds (state/exchange desync)."""
+    st, ex = ctx.state.state, ctx.broker.exchange
+    if ex is None or not st.open_positions:
+        return
+    try:
+        bal = ctx.broker._with_backoff(ex.fetch_balance)
+    except Exception as e:
+        ctx.logger.warning(f"reconcile skipped: {e}")
+        return
+    for symbol in list(st.open_positions):
+        base = symbol.split("/")[0]
+        held = float((bal.get(base, {}) or {}).get("free", 0.0) or 0.0)
+        want = st.open_positions[symbol]["quantity"]
+        if held < want * 0.5:  # mostly/entirely gone -> stale
+            ctx.logger.warning(f"reconcile: clearing stale {symbol} (held {held} < expected {want})")
+            del st.open_positions[symbol]
+    ctx.state.save()
+
+
+def _check_drawdown(ctx) -> None:
+    """Realized-equity max-drawdown circuit breaker."""
+    st, s = ctx.state.state, ctx.settings
+    st.peak_pnl = max(st.peak_pnl, st.cumulative_pnl)
+    dd = st.peak_pnl - st.cumulative_pnl
+    limit = s.live_capital_cap * s.max_drawdown_pct / 100.0
+    if dd > limit:
+        ctx.risk.trip_kill(f"max_drawdown {dd:.2f} > {limit:.2f}")
+        st.kill_switch_active = True
+        st.kill_switch_reason = ctx.risk.kill_reason
+        ctx.notifier.notify(f"🛑 KILL: max drawdown hit ({dd:.2f} USDT). Bot now manages exits only.")
 
 
 def run_once(ctx) -> None:
@@ -43,6 +78,7 @@ def run_once(ctx) -> None:
         ctx.risk.manual_kill = True
         ctx.risk.kill_reason = st.kill_switch_reason or "persisted"
 
+    _reconcile(ctx)
     capital = ctx.broker.free_quote()
     warmup = ctx.strategy.warmup_bars
 
@@ -77,11 +113,13 @@ def run_once(ctx) -> None:
                     if fill.status == "filled":
                         pnl = (fill.avg_price - pos["entry_price"]) * fill.filled_qty - fill.fee
                         st.realized_daily_pnl += pnl
+                        st.cumulative_pnl += pnl
                         del st.open_positions[symbol]
                         ctx.risk.register_pnl(pnl, capital)
-                        log.bind(event="trade").info(
-                            f"SELL {symbol} {fill.filled_qty} @ {fill.avg_price:.2f} pnl {pnl:+.2f} ({reason})"
-                        )
+                        msg = f"SELL {symbol} {fill.filled_qty} @ {fill.avg_price:.2f} pnl {pnl:+.2f} ({reason})"
+                        log.bind(event="trade").info(msg)
+                        ctx.notifier.notify(("✅ " if pnl >= 0 else "🔻 ") + msg)
+                        _check_drawdown(ctx)
                     else:
                         log.warning(f"{symbol}: exit not filled ({fill.status})")
             elif sig.action == Action.BUY and not ctx.risk.is_killed:
@@ -95,9 +133,9 @@ def run_once(ctx) -> None:
                         st.open_positions[symbol] = vars(
                             Position(symbol, fill.filled_qty, fill.avg_price, sig.stop_price, ts.isoformat())
                         )
-                        log.bind(event="trade").info(
-                            f"BUY {symbol} {fill.filled_qty} @ {fill.avg_price:.2f} stop {sig.stop_price:.2f}"
-                        )
+                        msg = f"BUY {symbol} {fill.filled_qty} @ {fill.avg_price:.2f} stop {sig.stop_price:.2f}"
+                        log.bind(event="trade").info(msg)
+                        ctx.notifier.notify("🟢 " + msg)
                     else:
                         log.warning(f"{symbol}: entry not filled ({fill.status})")
                 else:

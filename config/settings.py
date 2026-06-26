@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     max_daily_loss_pct: float = Field(default=5.0, gt=0, le=50, alias="MAX_DAILY_LOSS_PCT")
     max_consecutive_errors: int = Field(default=5, ge=1, alias="MAX_CONSECUTIVE_ERRORS")
     live_capital_cap: float = Field(default=100.0, gt=0, alias="LIVE_CAPITAL_CAP")
+    max_drawdown_pct: float = Field(default=25.0, gt=0, le=100, alias="MAX_DRAWDOWN_PCT")
+    max_total_exposure: float = Field(default=3.0, gt=0, alias="MAX_TOTAL_EXPOSURE")  # sum(notional)/equity cap
+
+    # --- notifications (optional; Telegram) ---
+    telegram_token: str = Field(default="", alias="TELEGRAM_TOKEN")
+    telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
+    funding_rate_estimate: float = Field(default=0.0001, alias="FUNDING_RATE_ESTIMATE")
 
     # --- backtest realism ---
     initial_capital: float = Field(default=400.0, gt=0, alias="INITIAL_CAPITAL")
