@@ -9,6 +9,7 @@ import pytest
 from src.backtest.backtester import BTConfig
 from src.risk.manager import RiskManager
 from src.runner.engine import LevPosition, PortfolioEngine
+from src.strategy.base import Action, Signal
 
 
 def _engine(leverage=10.0, capital=1000.0):
@@ -70,6 +71,32 @@ def test_trailing_chandelier_locks_profit_and_ratchets_only():
     assert p.stop_price > p.entry_price  # profit locked
     eng._update_trailing(p, 105.5, 105.5)  # pulled back; stop must NOT loosen
     assert p.stop_price == pytest.approx(105.0)
+
+
+def test_entry_gate_cooldown_and_same_side():
+    eng = _engine()
+    eng.cfg.min_edge_mult = 0.0  # isolate the cooldown/same-side checks
+    ts = pd.Timestamp("2024-01-01", tz="UTC")
+    sig = Signal(Action.BUY, "x", ts, 100.0, stop_price=95.0, atr=5.0)
+    assert eng._entry_allowed("BTC/USDT", sig, "LONG")
+    eng._cooldown["BTC/USDT"] = 2  # recent exit -> blocked
+    assert not eng._entry_allowed("BTC/USDT", sig, "LONG")
+    # same-direction cap
+    eng._cooldown.clear()
+    eng.cfg.max_same_side = 1
+    eng.positions["ETH/USDT"] = LevPosition("ETH/USDT", "LONG", 1.0, 1.0, 1.0, 1.0, 0.5, None, ts, 0.0, 0.0)
+    assert not eng._entry_allowed("BTC/USDT", sig, "LONG")  # already 1 long
+    assert eng._entry_allowed("BTC/USDT", sig, "SHORT")  # other side still allowed
+
+
+def test_entry_gate_min_edge_floor():
+    eng = _engine()
+    eng.cfg.min_edge_mult = 2.0  # threshold = 2 * (2*fee + 2*slip)
+    ts = pd.Timestamp("2024-01-01", tz="UTC")
+    thin = Signal(Action.BUY, "x", ts, 100.0, stop_price=99.99, atr=0.01)  # edge ~0.01% << cost
+    wide = Signal(Action.BUY, "x", ts, 100.0, stop_price=90.0, atr=5.0)  # edge 5% >> cost
+    assert not eng._entry_allowed("X/USDT", thin, "LONG")
+    assert eng._entry_allowed("X/USDT", wide, "LONG")
 
 
 def test_normal_close_pnl_accounting():

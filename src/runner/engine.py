@@ -291,6 +291,7 @@ class PortfolioEngine:
         self.last_signals: dict = {}
         self.events: deque[str] = deque(maxlen=400)
         self.liquidations = 0
+        self._cooldown: dict[str, int] = {}  # bars remaining before re-entry per symbol
         self.state_path = Path(state_path) if state_path else None
         self.lock = threading.RLock()  # guards state for the dashboard's HTTP reader thread
 
@@ -372,6 +373,8 @@ class PortfolioEngine:
         self.marks[symbol] = c
         slip = self.cfg.slippage_bps / 1e4
         fee_rate = self.cfg.fee_rate
+        if self._cooldown.get(symbol, 0) > 0:  # anti-whipsaw cooldown after a recent exit
+            self._cooldown[symbol] -= 1
 
         # (1) fill pending from previous bar at this open
         pend = self.pending.get(symbol)
@@ -385,7 +388,7 @@ class PortfolioEngine:
                 cap_pct = getattr(self.cfg, "max_position_pct", 1.0)
                 max_notional = min(self.cash, self.equity() * cap_pct) * self.leverage
                 sized = self.risk.size_position(
-                    capital_available=self.cash,  # risk base = actual cash (NOT inflated by leverage)
+                    capital_available=self.equity(),  # risk base = total equity (stable as cash shifts)
                     entry_price=sig.bar_close,
                     stop_price=sig.stop_price,
                     min_notional=self.cfg.min_notional,
@@ -466,15 +469,40 @@ class PortfolioEngine:
         sig = self.strategies[symbol].generate_signal(df, self._position_state(symbol))
         self.last_signals[symbol] = sig
         flat = symbol not in self.positions and self.pending.get(symbol) is None
-        if sig.action == Action.BUY and flat:
+        if sig.action == Action.BUY and flat and self._entry_allowed(symbol, sig, "LONG"):
             self.pending[symbol] = ("open", sig, "LONG")
-        elif sig.action == Action.SHORT and flat:
+        elif sig.action == Action.SHORT and flat and self._entry_allowed(symbol, sig, "SHORT"):
             self.pending[symbol] = ("open", sig, "SHORT")
         elif sig.action in (Action.SELL, Action.COVER) and symbol in self.positions:
             self.pending[symbol] = ("close", f"signal:{sig.reason}")
 
         self.last_processed_ts[symbol] = ts
         self.save()
+
+    def _entry_allowed(self, symbol, sig, side: str) -> bool:
+        """Durable cost/correlation gates before staging an entry (all inert-by-default-ish)."""
+        if self._cooldown.get(symbol, 0) > 0:  # anti-whipsaw cooldown after a recent exit
+            return False
+        # min-edge cost floor: skip entries whose expected move can't clear round-trip cost.
+        # For targeted (mean-reversion) signals use the target distance; for targetless trend
+        # entries use only an ATR viability floor so high-R tight-stop winners are NOT filtered.
+        rt = 2 * self.cfg.fee_rate + 2 * self.cfg.slippage_bps / 1e4
+        if sig.bar_close:
+            if sig.target_price is not None:
+                edge = abs(sig.target_price - sig.bar_close) / sig.bar_close
+            elif sig.atr:
+                edge = sig.atr / sig.bar_close
+            else:
+                edge = float("inf")
+            if edge < self.cfg.min_edge_mult * rt:
+                self._log(f"{symbol} entry skip: edge<cost ({edge*100:.2f}% < {self.cfg.min_edge_mult*rt*100:.2f}%)")
+                return False
+        # correlation control: cap simultaneous same-direction positions
+        same = sum(1 for p in self.positions.values() if p.side == side)
+        if same >= self.cfg.max_same_side:
+            self._log(f"{symbol} entry skip: max_same_side ({side})")
+            return False
+        return True
 
     def _position_state(self, symbol: str) -> PositionState:
         p = self.positions.get(symbol)
@@ -538,6 +566,7 @@ class PortfolioEngine:
         tag = {"liquidation": "LIQUIDATED", "stop": "STOP", "target": "TARGET"}.get(reason, "CLOSE")
         self._log(f"{symbol} {p.side} {tag} {p.qty:.6f} @ {fill:.2f} pnl {pnl:+.2f} ({reason})")
         self.pending[symbol] = None
+        self._cooldown[symbol] = int(getattr(self.cfg, "cooldown_bars", 0))  # wait before re-entry
 
     def _log(self, msg: str):
         self.events.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S  ") + msg)

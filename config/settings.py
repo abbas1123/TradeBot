@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     bb_std: float = Field(default=2.0, gt=0, alias="BB_STD")
     chop_period: int = Field(default=14, gt=1, alias="CHOP_PERIOD")
     chop_threshold: float = Field(default=50.0, gt=0, lt=100, alias="CHOP_THRESHOLD")
+    chop_band: float = Field(default=5.0, ge=0, alias="CHOP_BAND")  # hysteresis band around the threshold
 
     # --- confluence strategy params (alternative, spec §4.4) ---
     rsi_period: int = Field(default=14, gt=1, alias="RSI_PERIOD")

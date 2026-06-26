@@ -27,12 +27,22 @@ class RegimeSwitchStrategy(Strategy):
         self.warmup_bars = max(self.trend.warmup_bars, self.mr.warmup_bars, self.p.chop_period + 5)
         self.last_regime = "?"
         self._active = None  # the sub-strategy that owns the current open position
+        self._regime = None  # current regime with hysteresis ("trend"/"range")
 
     def generate_signal(self, df: pd.DataFrame, position: PositionState) -> Signal:
         ci = choppiness_index(df, self.p.chop_period).iloc[-1]
         ci_v = None if pd.isna(ci) else float(ci)
-        trending = (ci_v is None) or (ci_v < self.p.chop_threshold)
-        regime_sub = self.trend if trending else self.mr
+        thr = self.p.chop_threshold
+        band = getattr(self.p, "chop_band", 0.0)
+        # hysteresis: only flip regime once CI clears the band; inside the band, hold the
+        # current regime so a price hovering at the threshold can't churn trend<->range
+        if ci_v is None or ci_v < thr - band:
+            self._regime = "trend"
+        elif ci_v > thr + band:
+            self._regime = "range"
+        elif self._regime is None:
+            self._regime = "trend"
+        regime_sub = self.trend if self._regime == "trend" else self.mr
 
         if position.is_flat:
             self._active = regime_sub  # whoever is in charge when an entry is decided

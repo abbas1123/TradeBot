@@ -30,6 +30,10 @@ class BTConfig:
     trail_atr_mult: float = 2.5  # chandelier: trail stop this many ATRs below the peak
     breakeven_r: float = 1.0  # move stop to break-even once up this many R (initial risks)
     max_position_pct: float = 0.2  # cap each position's margin at this fraction of equity (diversification)
+    # cost / churn controls (durable, vetted improvements)
+    min_edge_mult: float = 2.0  # skip entries whose expected move < this * round-trip cost (inert on 1d/1h)
+    cooldown_bars: int = 1  # bars to wait on a symbol after an exit before re-entering (anti-whipsaw)
+    max_same_side: int = 8  # cap simultaneous same-direction positions (correlation control)
 
 
 @dataclass
@@ -266,6 +270,9 @@ def compute_metrics(equity: pd.Series, trades: list[Trade], bars_in_market: int,
             "avg_loss": (sum(losses) / len(losses)) if losses else 0.0,
         }
     )
+    total_fees = sum(getattr(t, "fees", 0.0) for t in trades)
+    out["total_fees"] = round(total_fees, 4)
+    out["fee_drag"] = (total_fees / equity.iloc[0]) if equity.iloc[0] else 0.0
     return out
 
 
@@ -283,4 +290,6 @@ def format_metrics(metrics: dict, label: str = "") -> str:
     lines.append(f"sharpe={num(metrics.get('sharpe', float('nan')))}  sortino={num(metrics.get('sortino', float('nan')))}")
     lines.append(f"win_rate={pct(metrics.get('win_rate', float('nan')))}  profit_factor={num(metrics.get('profit_factor', float('nan')))}")
     lines.append(f"avg_trade={num(metrics.get('avg_trade', float('nan')))}  avg_win={num(metrics.get('avg_win', float('nan')))}  avg_loss={num(metrics.get('avg_loss', float('nan')))}")
+    if "total_fees" in metrics:
+        lines.append(f"fees_paid={num(metrics.get('total_fees'))}  fee_drag={pct(metrics.get('fee_drag', float('nan')))}  <- cost as % of starting capital")
     return "\n".join(lines)

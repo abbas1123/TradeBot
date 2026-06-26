@@ -527,6 +527,10 @@ def main(argv=None):
         logger.error("paper needs BINANCE_TESTNET=true + testnet keys; live needs BINANCE_TESTNET=false + live keys, in .env")
         return
 
+    eff_tf = (args.timeframe or settings.timeframe).lower()
+    if eff_tf.endswith("m") and args.mode in ("serve", "simulate", "paper", "live"):
+        logger.warning(f"Timeframe {eff_tf} is sub-hourly — fee drag from overtrading dominates at this scale. Prefer 1h/4h/1d for real use; 1m is for watching only.")
+
     try:
         if args.mode == "backtest":
             futures_strats = {"donchian_futures", "futures", "regime", "mean_reversion"}
