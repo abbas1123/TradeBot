@@ -356,6 +356,54 @@ def _serve_symbols(settings, args, exchange) -> list[str]:
     return top_symbols(exchange, n=args.top, quote="USDT")
 
 
+def _write_status_page(engine, symbols, path="docs/index.html"):
+    """Write a static status page (for free GitHub Pages) from the latest once-run state.
+    Regenerated each hourly run and committed back — gives a phone-viewable URL, no server."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    eq, ret, cash = engine.equity(), engine.total_return() * 100, engine.cash
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    rcls = "g" if ret >= 0 else "r"
+    rows = ""
+    for sym in symbols:
+        p = engine.positions.get(sym)
+        if p:
+            mk = engine.marks.get(sym, p.entry_price)
+            unr = p.unrealized(mk)
+            rows += (f"<tr><td><b>{sym}</b></td><td>{p.side}</td><td>{p.entry_price:.4f}</td>"
+                     f"<td>{mk:.4f}</td><td class='{'g' if unr >= 0 else 'r'}'>{unr:+.2f}</td></tr>")
+    if not rows:
+        rows = "<tr><td colspan='5' style='color:#8b97a7'>Açıq pozisiya yox · no open positions</td></tr>"
+    events = "\n".join(reversed(list(engine.events)[-15:])) or "—"
+    html = f"""<!doctype html><html lang="az"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="300"><title>TradeBot status</title>
+<style>
+ body{{background:#0d1117;color:#e6edf3;font-family:system-ui,Segoe UI,Arial;margin:0;padding:18px;max-width:760px}}
+ h1{{font-size:18px;margin:0 0 2px}} .sub{{color:#8b97a7;font-size:12px;margin-bottom:16px}}
+ .eq{{font-size:40px;font-weight:700}} .ret{{font-size:20px;font-weight:600;margin-left:8px}}
+ .g{{color:#3fb950}} .r{{color:#f85149}} .card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 16px;margin:12px 0}}
+ table{{width:100%;border-collapse:collapse;font-size:14px}} th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d}}
+ th{{color:#8b97a7;font-weight:500}} pre{{background:#0d1117;color:#9da7b3;font-size:12px;white-space:pre-wrap;margin:0}}
+ .k{{color:#8b97a7;font-size:12px}}
+</style></head><body>
+ <h1>🤖 TradeBot — paper status</h1>
+ <div class="sub">Son yenilənmə · last update: {now} · hər saat yenilənir / updates hourly</div>
+ <div class="card">
+   <div><span class="eq">${eq:,.2f}</span><span class="ret {rcls}">{ret:+.2f}%</span></div>
+   <div class="k">Boş / free cash: ${cash:,.2f} · trades: {len(engine.trades)} · open: {len(engine.positions)}</div>
+ </div>
+ <div class="card"><h3 style="margin:0 0 8px;font-size:14px">Pozisiyalar / positions</h3>
+   <table><thead><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Mark</th><th>PnL</th></tr></thead>
+   <tbody>{rows}</tbody></table></div>
+ <div class="card"><h3 style="margin:0 0 8px;font-size:14px">Son hadisələr / recent activity</h3><pre>{events}</pre></div>
+ <div class="sub">⚠️ Paper money (saxta balans) · not financial advice · evaluates the basket every hour</div>
+</body></html>"""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(html, encoding="utf-8")
+
+
 def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger):
     """One keyless pass over the basket (GitHub Actions / cron): resume saved state, step each
     coin on its latest CLOSED bar using public price data (no API keys), persist, report, exit."""
@@ -369,6 +417,10 @@ def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, log
         except Exception as e:
             logger.warning(f"{s}: {e}")
     engine.save()
+    try:
+        _write_status_page(engine, symbols)  # static page for free GitHub Pages
+    except Exception as e:
+        logger.warning(f"status page: {e}")
     eq = engine.equity()
     logger.info(f"Run complete: equity {eq:,.2f} ({engine.total_return()*100:+.2f}%) · "
                 f"{len(engine.positions)} open · {len(engine.trades)} trades total")
