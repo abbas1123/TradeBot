@@ -67,20 +67,21 @@ sudo systemctl enable --now tradebot
 sudo journalctl -u tradebot -f      # watch logs
 ```
 
-## Option C: GitHub Actions — FREE, no card, no server (daily cadence)
+## Option C: GitHub Actions — FREE, no card, no server, NO exchange keys (hourly)
 
-Best fully-free option if you don't want a VM. Runs ONE iteration per day on the Binance
-**testnet** (paper), reports to Telegram, persists state in the repo. Daily granularity
-only (Actions can't run continuously) — which is exactly right for the 1d strategy.
+Best fully-free option if you don't want a VM. Runs ONE **keyless** iteration per HOUR on
+public price data (Kraken — Binance blocks cloud IPs), reports to Telegram, and commits its
+state back so positions persist between runs. No exchange account, no testnet, nothing to lose.
 
-1. Push this repo to GitHub (private is fine).
-2. Get free Binance Spot **testnet** keys: https://testnet.binance.vision
-3. Repo → Settings → Secrets and variables → Actions → New repository secret, add:
-   `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`
-4. Actions tab → enable workflows → open "TradeBot daily paper run" → **Run workflow** to test.
-   After that it runs automatically every day at 00:05 UTC (`.github/workflows/trade.yml`).
+1. Publish this repo to GitHub (private is fine — e.g. via GitHub Desktop).
+2. Repo → Settings → Secrets and variables → Actions → New repository secret, add ONLY:
+   `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`  (copy from your local `.env`).
+3. Actions tab → enable workflows → open "TradeBot hourly paper run" → **Run workflow** to test.
+   After that it runs automatically every hour (`.github/workflows/trade.yml`).
 
-No credit card, no server, $0. Trade-off: it acts once a day, not in real time.
+No credit card, no server, no keys, $0. It evaluates the basket every hour and reports via
+Telegram. (Monitoring is via Telegram — the live web dashboard needs a continuously-running
+server, which Actions is not.)
 
 ## Notes
 - `--no-open` skips the browser (headless server). The web dashboard still runs on

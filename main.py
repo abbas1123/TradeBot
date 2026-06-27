@@ -356,6 +356,35 @@ def _serve_symbols(settings, args, exchange) -> list[str]:
     return top_symbols(exchange, n=args.top, quote="USDT")
 
 
+def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger):
+    """One keyless pass over the basket (GitHub Actions / cron): resume saved state, step each
+    coin on its latest CLOSED bar using public price data (no API keys), persist, report, exit."""
+    if not args.reset and engine.load():
+        logger.info(f"Resumed state: equity {engine.equity():,.2f}, {len(engine.positions)} open positions")
+    ev_before = len(engine.events)
+    for s in symbols:
+        try:
+            df = fetcher.fetch_latest(s, timeframe, warmup + 5)
+            engine.step(s, df)
+        except Exception as e:
+            logger.warning(f"{s}: {e}")
+    engine.save()
+    eq = engine.equity()
+    logger.info(f"Run complete: equity {eq:,.2f} ({engine.total_return()*100:+.2f}%) · "
+                f"{len(engine.positions)} open · {len(engine.trades)} trades total")
+    if notifier.enabled:
+        for e in list(engine.events)[ev_before:]:  # alert on any open/close this run, with balance
+            if any(k in e for k in ("BUY", "SHORT", "SELL", "COVER", "LIQUIDATED")):
+                notifier.notify(f"🔔 Əməliyyat / Trade:\n{e}\n💰 Balans / Equity: {eq:,.2f} USDT")
+        rows = []
+        for sym in symbols:
+            p = engine.positions.get(sym)
+            if p:
+                mk = engine.marks.get(sym, p.entry_price)
+                rows.append((sym, p.side, p.entry_price, mk, p.unrealized(mk)))
+        notifier.report(eq, engine.cash, rows, extra=f"{len(engine.positions)} açıq / open · GitHub hourly")
+
+
 def run_serve(settings, args, logger):
     from src.runner.webserver import Monitor, serve
 
@@ -380,10 +409,15 @@ def run_serve(settings, args, logger):
     if args.leverage > 1:
         logger.warning("Leverage amplifies BOTH profit and loss; a position is liquidated (margin lost) when its margin ratio hits 100%. Paper money only.")
 
-    info = {"strategy": strat_name, "timeframe": timeframe, "mode": f"serve/{args.source}", "status": "starting..."}
-    monitor = Monitor(engine, info)
     from src.utils.notify import Notifier
     notifier = Notifier(settings)
+
+    if args.once:  # keyless single pass (GitHub Actions / cron): step each coin once, persist, report, exit
+        _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger)
+        return
+
+    info = {"strategy": strat_name, "timeframe": timeframe, "mode": f"serve/{args.source}", "status": "starting..."}
+    monitor = Monitor(engine, info)
     duration_sec = int(args.duration * 60) if args.duration else 0
     monitor.session_total = duration_sec
 

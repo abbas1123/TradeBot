@@ -623,3 +623,27 @@ class PortfolioEngine:
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_path)
+
+    def load(self) -> bool:
+        """Restore cash/positions/realized state from disk (resume across once-per-run jobs)."""
+        if not self.state_path or not self.state_path.exists():
+            return False
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        import dataclasses
+        self.cash = float(data.get("cash", self.cash))
+        self.realized_pnl = float(data.get("realized_pnl", 0.0))
+        self.liquidations = int(data.get("liquidations", 0))
+        self.funding_total = float(data.get("funding_total", 0.0))
+        fields = {f.name for f in dataclasses.fields(LevPosition)}
+        self.positions = {}
+        for sym, d in data.get("positions", {}).items():
+            d = {k: v for k, v in dict(d).items() if k in fields}  # tolerate schema drift
+            ts = d.get("entry_ts")
+            d["entry_ts"] = pd.Timestamp(ts) if ts else None
+            self.positions[sym] = LevPosition(**d)
+        self.last_processed_ts = {s: (pd.Timestamp(t) if t else None)
+                                  for s, t in data.get("last_processed_ts", {}).items()}
+        return True
