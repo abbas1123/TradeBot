@@ -1,8 +1,8 @@
-name: TradeBot daily paper run
+name: TradeBot hourly paper run
 
-# FREE 24/7 (daily cadence) on GitHub Actions — no server, no credit card.
-# Runs one iteration per day on the Binance Spot TESTNET (paper money), reports to
-# Telegram, and commits its state back so positions persist between days.
+# FREE 24/7 on GitHub Actions — no server, no credit card.
+# Runs one iteration per HOUR on the Binance Spot TESTNET (paper money), reports to
+# Telegram, and commits its state back so positions persist between runs.
 #
 # SETUP (one time):
 #   1) Push this repo to GitHub (private is fine).
@@ -16,7 +16,7 @@ name: TradeBot daily paper run
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # 00:05 UTC daily, just after the daily candle closes
+    - cron: "2 * * * *"    # hourly, ~2 min after each 1h candle closes (evaluate every hour)
   workflow_dispatch: {}    # manual "Run workflow" button for testing
 
 permissions:
@@ -43,11 +43,11 @@ jobs:
           BINANCE_API_SECRET=${{ secrets.BINANCE_API_SECRET }}
           BINANCE_TESTNET=true
           MODE=paper
-          PAIRS=BTC/USDT,ETH/USDT,SOL/USDT
-          TIMEFRAME=1d
+          PAIRS=BTC/USDT,ETH/USDT,BNB/USDT,XRP/USDT,SOL/USDT,ADA/USDT,DOGE/USDT,LTC/USDT,TRX/USDT,LINK/USDT
+          TIMEFRAME=1h
           STRATEGY=donchian
           RISK_PER_TRADE_PCT=2
-          MAX_OPEN_POSITIONS=3
+          MAX_OPEN_POSITIONS=10
           LIVE_CAPITAL_CAP=1000
           STATE_PATH=runtime_state.json
           TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
