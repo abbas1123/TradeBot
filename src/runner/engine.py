@@ -25,6 +25,7 @@ from ..backtest.backtester import BTConfig, Trade
 from ..execution import futures
 from ..strategy.base import Action, PositionState
 from ..strategy.exits import check_level_exit
+from ..utils.ledger import append_ledger
 
 
 class SimEngine:
@@ -271,7 +272,8 @@ class PortfolioEngine:
 
     def __init__(self, strategies: dict, risk, cfg: BTConfig, leverage: float = 1.0,
                  funding_rate: float = 0.0001, bar_hours: float = 24.0,
-                 liq_fee_rate: float = 0.005, state_path: str | None = None):
+                 liq_fee_rate: float = 0.005, state_path: str | None = None,
+                 ledger_path: str | None = None):
         self.strategies = strategies  # {symbol: Strategy}
         self.symbols = list(strategies.keys())
         self.risk = risk
@@ -293,6 +295,10 @@ class PortfolioEngine:
         self.liquidations = 0
         self._cooldown: dict[str, int] = {}  # bars remaining before re-entry per symbol
         self.state_path = Path(state_path) if state_path else None
+        # balance ledger: one record per open/close with the equity snapshot at that instant.
+        # In-memory deque feeds the dashboard; the file (if set) is the durable journal.
+        self.ledger_path = ledger_path
+        self.ledger: deque[dict] = deque(maxlen=200)
         self.lock = threading.RLock()  # guards state for the dashboard's HTTP reader thread
 
     def warmup_for(self, symbol: str) -> int:
@@ -418,6 +424,7 @@ class PortfolioEngine:
                         )
                         lv = f" x{self.leverage:g}" if self.leverage > 1 else ""
                         self._log(f"{symbol} {side} {sized.quantity:.6f} @ {fill:.2f}{lv} stop {sig.stop_price:.2f} liq {liq:.2f}")
+                        self._record_ledger("OPEN", symbol, side, fill, sized.quantity, ts)
                     else:
                         self._log(f"{symbol} entry skip: margin {im:.2f} > cash {self.cash:.2f}")
             elif kind == "close" and symbol in self.positions:
@@ -567,6 +574,27 @@ class PortfolioEngine:
         self._log(f"{symbol} {p.side} {tag} {p.qty:.6f} @ {fill:.2f} pnl {pnl:+.2f} ({reason})")
         self.pending[symbol] = None
         self._cooldown[symbol] = int(getattr(self.cfg, "cooldown_bars", 0))  # wait before re-entry
+        self._record_ledger("CLOSE", symbol, p.side, fill, p.qty, ts, pnl=pnl, reason=reason)
+
+    def _record_ledger(self, event: str, symbol: str, side: str, price: float, qty: float,
+                       ts, pnl: float | None = None, reason: str | None = None):
+        """Snapshot the balance at the instant a position opens/closes -> deque + journal file.
+
+        Called AFTER the cash/position change so equity() reflects the post-event balance."""
+        rec = {
+            "ts": str(ts), "event": event, "symbol": symbol, "side": side,
+            "price": round(float(price), 6), "qty": round(float(qty), 8),
+            "equity": round(self.equity(), 2), "cash": round(self.cash, 2),
+            "realized_pnl": round(self.realized_pnl, 2),
+            "unrealized_pnl": round(self.unrealized(), 2),
+            "source": "serve",
+        }
+        if pnl is not None:
+            rec["pnl"] = round(float(pnl), 2)
+        if reason is not None:
+            rec["reason"] = reason
+        self.ledger.append(rec)
+        append_ledger(self.ledger_path, rec)
 
     def _log(self, msg: str):
         self.events.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S  ") + msg)

@@ -79,6 +79,7 @@ class Monitor:
                 "fees_total": round(fees, 4),
                 "events": list(e.events)[-18:],
                 "recent_trades": recent_trades,
+                "ledger": list(getattr(e, "ledger", []))[-10:],  # balance at each open/close
                 "equity_curve": list(self.equity_curve),
                 "session": self._session(),
             }
@@ -297,6 +298,10 @@ PAGE = r"""<!doctype html>
     </div>
   </div>
 
+  <div class="panel"><h3>Balance history (open/close)</h3>
+    <table id="ledtbl"><thead><tr><th>Time (UTC)</th><th>Event</th><th>Symbol</th><th>Side</th><th>PnL</th><th>Balance</th></tr></thead><tbody></tbody></table>
+  </div>
+
   <div class="panel"><h3>Activity log</h3><div class="log" id="logbox">—</div></div>
   <footer>Auto-refresh 1s · paper trading, fake balance · not financial advice</footer>
 </div>
@@ -365,6 +370,17 @@ function render(s){
     const tr=document.createElement('tr');
     tr.innerHTML='<td>'+fmt(t.entry)+'</td><td>'+fmt(t.exit)+'</td><td class="'+cls(t.pnl)+'">'+sign(t.pnl)+'</td><td style="color:#8b97a7;text-align:left">'+t.reason+'</td>';
     tb.appendChild(tr);
+  });
+
+  // balance history (equity snapshot at each open/close)
+  const lb=document.querySelector('#ledtbl tbody'); lb.innerHTML='';
+  (s.ledger||[]).slice().reverse().forEach(r=>{
+    const tr=document.createElement('tr');
+    const t=(r.ts||'').replace('T',' ').slice(0,19);
+    const ev=r.event==='OPEN'?'<span class="badge long">OPEN</span>':'<span class="badge short">CLOSE</span>';
+    const pnl=(r.pnl!=null)?('<span class="'+cls(r.pnl)+'">'+sign(r.pnl)+'</span>'):'—';
+    tr.innerHTML='<td>'+t+'</td><td>'+ev+'</td><td><b>'+r.symbol+'</b></td><td>'+(r.side||'')+'</td><td>'+pnl+'</td><td><b>'+fmt(r.equity)+'</b></td>';
+    lb.appendChild(tr);
   });
 
   document.getElementById('logbox').textContent=(s.events||[]).slice().reverse().join('\n')||'—';

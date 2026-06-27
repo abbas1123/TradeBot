@@ -42,7 +42,7 @@ REGIMES = {
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradingbot")
-    p.add_argument("--mode", choices=["backtest", "replay", "simulate", "serve", "optimize", "validate", "status", "paper", "live"], default="backtest")
+    p.add_argument("--mode", choices=["backtest", "replay", "simulate", "serve", "dca", "optimize", "validate", "status", "paper", "live"], default="backtest")
     p.add_argument("--once", action="store_true", help="single iteration (paper/live)")
     p.add_argument("--symbol", default=None, help="e.g. BTC/USDT")
     p.add_argument("--symbols", default=None, help="serve: comma list, or 'auto' for top-volume coins")
@@ -59,7 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--watch", action=argparse.BooleanOptionalAction, default=True, help="live dashboard (use --no-watch for plain text)")
     p.add_argument("--speed", type=float, default=30.0, help="replay bars per second")
     p.add_argument("--poll", type=float, default=5.0, help="simulate poll interval seconds")
-    p.add_argument("--report-min", type=float, default=30.0, help="serve: Telegram heartbeat report interval (minutes)")
+    p.add_argument("--report-min", type=float, default=30.0, help="serve/dca: Telegram heartbeat report interval (minutes)")
+    p.add_argument("--dca-every", type=int, default=7, help="dca replay: bars between buys (7=weekly on 1d)")
+    p.add_argument("--dca-buys", type=int, default=52, help="dca live: number of tranches to split the budget into")
     p.add_argument("--max-ticks", type=int, default=0, help="simulate: stop after N polls (0=run forever)")
     p.add_argument("--capital", type=float, default=None, help="override starting fake balance")
     p.add_argument("--state", default="data_store/sim_state.json", help="simulation state file")
@@ -149,6 +151,101 @@ def run_backtest(settings, args, logger):
         _one(_slice(df, args.split, args.end, warmup, tf_ms), "out_of_sample")
     else:
         _one(_slice(df, args.start, args.end, warmup, tf_ms), "full")
+
+
+def run_dca(settings, args, logger):
+    """DCA mode: periodically buy a fixed budget split across the basket and HOLD.
+
+    Data-backed alternative to the trading bot (in backtests DCA/hold beat it). Reuses the
+    same web dashboard + Telegram. Default --source replay shows the full historical growth;
+    --source live deploys the lump sum in tranches against live prices."""
+    from src.runner.dca import DCAEngine
+    from src.runner.webserver import Monitor, serve
+    from src.utils.notify import Notifier
+
+    _, timeframe, _, exchange, fetcher, cfg = _common(settings, args)
+    symbols = _serve_symbols(settings, args, exchange)
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000
+    ledger_path = "data_store/balance_ledger.jsonl"
+    notifier = Notifier(settings)
+    info = {"strategy": "DCA · buy & hold basket", "timeframe": timeframe,
+            "mode": f"dca/{args.source}", "status": "starting..."}
+
+    if args.source == "replay":
+        dfs = {s: _slice(fetcher.fetch_ohlcv(s, timeframe, use_cache=not args.refresh_data),
+                         args.start, args.end, 0, tf_ms) for s in symbols}
+        min_len = min((len(d) for d in dfs.values()), default=0)
+        # align by position to a common recent window (coins list on different dates)
+        dfs = {s: d.iloc[-min_len:].reset_index(drop=True) for s, d in dfs.items()}
+        every = max(1, args.dca_every)
+        n_buys = max(1, len(range(0, min_len, every)))
+        engine = DCAEngine(symbols, cfg, n_buys=n_buys, ledger_path=ledger_path)
+        monitor = Monitor(engine, info)
+        logger.info(f"DCA replay: {', '.join(symbols)} {timeframe} · ${cfg.initial_capital:,.0f} · {n_buys} buys every {every} bars")
+
+        def loop():
+            buyset = set(range(0, min_len, every))
+            for i in range(min_len):
+                ts = None
+                for s in symbols:
+                    if i < len(dfs[s]):
+                        row = dfs[s].iloc[i]
+                        engine.set_mark(s, float(row["close"]))
+                        ts = row["timestamp"]
+                if i in buyset:
+                    engine.invest_round(ts)
+                info["status"] = f"replay {i+1}/{min_len} · {engine.buys_done}/{n_buys} buys · equity {engine.equity():,.2f}"
+                monitor.record()
+                if args.speed > 0:
+                    time.sleep(1.0 / args.speed)
+            info["status"] = f"DCA replay complete · final equity {engine.equity():,.2f} ({engine.total_return()*100:+.1f}%)"
+            if notifier.enabled:
+                notifier.notify(f"📅 DCA replay done · equity {engine.equity():,.2f} ({engine.total_return()*100:+.1f}%)")
+    else:  # live
+        engine = DCAEngine(symbols, cfg, n_buys=max(1, args.dca_buys), ledger_path=ledger_path)
+        monitor = Monitor(engine, info)
+        tf_seconds = exchange.parse_timeframe(timeframe)
+        logger.info(f"DCA live: {', '.join(symbols)} · ${cfg.initial_capital:,.0f} · {args.dca_buys} tranches every {max(tf_seconds,60)}s")
+
+        def loop():
+            monitor.start_session()
+            last_buy = last_report = 0.0
+            last_ev = 0
+            buy_interval = max(tf_seconds, 60)
+            while True:
+                now = time.time()
+                try:
+                    tickers = exchange.fetch_tickers(symbols)
+                except Exception as e:
+                    tickers = {}
+                    info["status"] = f"tickers error: {e}"
+                for s in symbols:
+                    t = tickers.get(s)
+                    if t and t.get("last"):
+                        engine.update_mark(s, float(t["last"]))
+                if now - last_buy >= buy_interval and engine.buys_done < engine.n_buys:
+                    engine.invest_round(pd.Timestamp.now(tz="UTC"))
+                    last_buy = now
+                info["status"] = f"live · {engine.buys_done}/{engine.n_buys} buys · equity {engine.equity():,.2f}"
+                monitor.record()
+                if notifier.enabled:
+                    evs = list(engine.events)
+                    for ev in evs[last_ev:]:
+                        if "DCA buy" in ev:
+                            notifier.notify(f"📅 {ev}")
+                    last_ev = len(evs)
+                    if now - last_report >= args.report_min * 60:
+                        rows = []
+                        for sym in symbols:
+                            p = engine.positions.get(sym)
+                            if p:
+                                mk = engine.marks.get(sym, p.entry_price)
+                                rows.append((sym, "HOLD", p.entry_price, mk, p.unrealized(mk)))
+                        notifier.report(engine.equity(), engine.cash, rows, extra=f"DCA {engine.buys_done}/{engine.n_buys} buys")
+                        last_report = now
+                time.sleep(args.poll)
+
+    serve(monitor, loop, host="127.0.0.1", port=args.port, open_browser=args.open, logger=logger)
 
 
 def run_futures_backtest(settings, args, logger):
@@ -274,6 +371,7 @@ def run_serve(settings, args, logger):
     engine = PortfolioEngine(
         strategies, RiskManager(settings), cfg, leverage=args.leverage,
         funding_rate=args.funding, bar_hours=bar_hours, state_path=state_path,
+        ledger_path="data_store/balance_ledger.jsonl",  # balance snapshot per open/close
     )
     warmup = max(st.warmup_bars for st in strategies.values())
 
@@ -348,7 +446,12 @@ def run_serve(settings, args, logger):
                     evs = list(engine.events)
                     for e in evs[last_ev:]:
                         if any(k in e for k in ("BUY", "SHORT", "SELL", "COVER", "LIQUIDATED")):
-                            notifier.notify("🔔 Əməliyyat / Trade:\n" + e)
+                            # each open/close alert carries the instant balance/equity
+                            notifier.notify(
+                                f"🔔 Əməliyyat / Trade:\n{e}\n"
+                                f"💰 Balans / Equity: {engine.equity():,.2f} USDT "
+                                f"(boş / free {engine.cash:,.2f})"
+                            )
                     last_ev = len(evs)
                     # (ii) periodic bilingual position/equity heartbeat
                     if now - last_report >= args.report_min * 60:
@@ -512,10 +615,10 @@ def main(argv=None):
     overrides = {"strategy": args.strategy, "timeframe": args.timeframe}
     if args.risk:
         overrides["risk_per_trade_pct"] = args.risk
-    if args.mode in ("backtest", "replay", "simulate", "serve", "optimize", "validate", "status"):
+    if args.mode in ("backtest", "replay", "simulate", "serve", "dca", "optimize", "validate", "status"):
         overrides["mode"] = "backtest"  # keyless analysis/sim — dry-run engine
         overrides["live_capital_cap"] = 1e12  # fake balance fully usable in paper modes
-        if args.mode == "serve":
+        if args.mode in ("serve", "dca"):
             overrides["max_open_positions"] = 1000
     else:  # paper / live -> real execution; Settings enforces keys + mode/testnet interlock
         overrides["mode"] = args.mode
@@ -545,6 +648,8 @@ def main(argv=None):
             run_simulate_mode(settings, args, logger)
         elif args.mode == "serve":
             run_serve(settings, args, logger)
+        elif args.mode == "dca":
+            run_dca(settings, args, logger)
         elif args.mode == "optimize":
             run_optimize(settings, args, logger)
         elif args.mode == "validate":

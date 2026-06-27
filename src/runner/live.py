@@ -18,9 +18,20 @@ from ..risk.manager import RiskManager
 from ..risk.types import ApprovedOrder
 from ..strategy.base import Action, PositionState
 from ..strategy.registry import get_strategy
+from ..utils.ledger import append_ledger
 from ..utils.logger import get_logger
 from ..utils.notify import Notifier
 from ..utils.state import Position, StateStore
+
+_LEDGER_PATH = "data_store/balance_ledger.jsonl"
+
+
+def _live_equity(available: float, open_positions: dict, marks: dict) -> float:
+    """Total equity = free cash + market value of open spot positions."""
+    eq = available
+    for sym, q in open_positions.items():
+        eq += marks.get(sym, q["entry_price"]) * q["quantity"]
+    return eq
 
 
 def build_context(settings):
@@ -127,9 +138,20 @@ def run_once(ctx) -> None:
                         st.cumulative_pnl += pnl
                         del st.open_positions[symbol]
                         ctx.risk.register_pnl(pnl, capital)
+                        eq = _live_equity(available, st.open_positions, marks)
                         msg = f"SELL {symbol} {fill.filled_qty} @ {fill.avg_price:.2f} pnl {pnl:+.2f} ({reason})"
                         log.bind(event="trade").info(msg)
-                        ctx.notifier.notify(("✅ " if pnl >= 0 else "🔻 ") + msg)
+                        ctx.notifier.notify(
+                            ("✅ " if pnl >= 0 else "🔻 ") + f"{msg}\n"
+                            f"💰 Balans / Equity: {eq:,.2f} USDT (boş / free {available:,.2f})"
+                        )
+                        append_ledger(_LEDGER_PATH, {
+                            "ts": ts.isoformat(), "event": "CLOSE", "symbol": symbol, "side": "LONG",
+                            "price": round(fill.avg_price, 6), "qty": round(fill.filled_qty, 8),
+                            "equity": round(eq, 2), "cash": round(available, 2),
+                            "realized_pnl": round(st.cumulative_pnl, 2), "pnl": round(pnl, 2),
+                            "reason": reason, "source": "live",
+                        })
                         _check_drawdown(ctx)
                     else:
                         log.warning(f"{symbol}: exit not filled ({fill.status})")
@@ -145,9 +167,18 @@ def run_once(ctx) -> None:
                         st.open_positions[symbol] = vars(
                             Position(symbol, fill.filled_qty, fill.avg_price, sig.stop_price, ts.isoformat())
                         )
+                        eq = _live_equity(available, st.open_positions, marks)
                         msg = f"BUY {symbol} {fill.filled_qty} @ {fill.avg_price:.2f} stop {sig.stop_price:.2f}"
                         log.bind(event="trade").info(msg)
-                        ctx.notifier.notify("🟢 " + msg)
+                        ctx.notifier.notify(
+                            f"🟢 {msg}\n💰 Balans / Equity: {eq:,.2f} USDT (boş / free {available:,.2f})"
+                        )
+                        append_ledger(_LEDGER_PATH, {
+                            "ts": ts.isoformat(), "event": "OPEN", "symbol": symbol, "side": "LONG",
+                            "price": round(fill.avg_price, 6), "qty": round(fill.filled_qty, 8),
+                            "equity": round(eq, 2), "cash": round(available, 2),
+                            "realized_pnl": round(st.cumulative_pnl, 2), "source": "live",
+                        })
                     else:
                         log.warning(f"{symbol}: entry not filled ({fill.status})")
                 else:
