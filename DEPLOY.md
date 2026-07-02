@@ -90,3 +90,8 @@ server, which Actions is not.)
   keys and `--mode paper`/`live` — but only after weeks of validation.
 - Higher `--timeframe` (1h/4h/1d) = far fewer trades = far less fee drag. **Avoid 1m for
   anything but watching** — it bleeds fees.
+- **Failure alerting:** if the hourly Actions run fails (bad data, pip break, corrupt
+  state), a 🛑 Telegram message with the run URL is sent automatically.
+- **Corrupt state recovery:** a broken `runtime_state.json` makes the run FAIL LOUDLY
+  (never a silent reset to $1000). The original is saved as `*.corrupt-<timestamp>` —
+  inspect/restore it, or delete the state file to intentionally start fresh.

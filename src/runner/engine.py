@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -286,6 +287,7 @@ class PortfolioEngine:
         self.positions: dict[str, LevPosition] = {}
         self.pending: dict[str, object] = {}
         self.trades: list[Trade] = []
+        self.trades_total = 0  # lifetime count (self.trades is bounded in the state file)
         self.realized_pnl = 0.0
         self.funding_total = 0.0
         self.marks: dict[str, float] = {}
@@ -395,7 +397,7 @@ class PortfolioEngine:
                 max_notional = min(self.cash, self.equity() * cap_pct) * self.leverage
                 sized = self.risk.size_position(
                     capital_available=self.equity(),  # risk base = total equity (stable as cash shifts)
-                    entry_price=sig.bar_close,
+                    entry_price=fill,  # size at the actual fill, not the signal bar's close (gap-safe)
                     stop_price=sig.stop_price,
                     min_notional=self.cfg.min_notional,
                     lot_step=self.cfg.lot_step,
@@ -570,6 +572,7 @@ class PortfolioEngine:
             qty=p.qty, fees=p.entry_fee + exit_fee + liq_fee, pnl=pnl,
             pnl_pct=(pnl / p.im) if p.im else 0.0, bars_held=0, exit_reason=reason,
         ))
+        self.trades_total += 1
         tag = {"liquidation": "LIQUIDATED", "stop": "STOP", "target": "TARGET"}.get(reason, "CLOSE")
         self._log(f"{symbol} {p.side} {tag} {p.qty:.6f} @ {fill:.2f} pnl {pnl:+.2f} ({reason})")
         self.pending[symbol] = None
@@ -616,7 +619,10 @@ class PortfolioEngine:
             "initial_capital": self.cfg.initial_capital,
             "positions": positions,
             "last_processed_ts": {s: (pd.Timestamp(t).isoformat() if t is not None else None) for s, t in self.last_processed_ts.items()},
-            "num_trades": len(self.trades),
+            "num_trades": max(self.trades_total, len(self.trades)),
+            "trades_total": max(self.trades_total, len(self.trades)),
+            # bounded trade history so it survives once-per-run jobs (GitHub Actions)
+            "trades": [self._trade_dict(t) for t in self.trades[-500:]],
             "liquidations": self.liquidations,
             "funding_total": self.funding_total,
         }
@@ -624,14 +630,31 @@ class PortfolioEngine:
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_path)
 
+    @staticmethod
+    def _trade_dict(t: Trade) -> dict:
+        d = asdict(t)
+        for k in ("entry_time", "exit_time"):
+            d[k] = pd.Timestamp(d[k]).isoformat() if d[k] is not None else None
+        return d
+
     def load(self) -> bool:
-        """Restore cash/positions/realized state from disk (resume across once-per-run jobs)."""
+        """Restore cash/positions/trades from disk (resume across once-per-run jobs).
+
+        A corrupt state file raises (after saving a .corrupt-* backup) instead of
+        silently restarting at initial capital — losing the account history must be
+        a loud, operator-visible failure, never an accidental reset."""
         if not self.state_path or not self.state_path.exists():
             return False
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
+        except Exception as e:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup = self.state_path.with_name(self.state_path.name + f".corrupt-{stamp}")
+            shutil.copy2(self.state_path, backup)
+            raise RuntimeError(
+                f"corrupt state file {self.state_path} (backed up to {backup}); "
+                "refusing to reset to initial capital — inspect or delete the file to start fresh"
+            ) from e
         import dataclasses
         self.cash = float(data.get("cash", self.cash))
         self.realized_pnl = float(data.get("realized_pnl", 0.0))
@@ -646,4 +669,12 @@ class PortfolioEngine:
             self.positions[sym] = LevPosition(**d)
         self.last_processed_ts = {s: (pd.Timestamp(t) if t else None)
                                   for s, t in data.get("last_processed_ts", {}).items()}
+        tfields = {f.name for f in dataclasses.fields(Trade)}
+        self.trades = []
+        for d in data.get("trades", []):  # tolerate pre-history state files (no "trades" key)
+            d = {k: v for k, v in dict(d).items() if k in tfields}
+            for k in ("entry_time", "exit_time"):
+                d[k] = pd.Timestamp(d[k]) if d.get(k) else None
+            self.trades.append(Trade(**d))
+        self.trades_total = int(data.get("trades_total", data.get("num_trades", len(self.trades))))
         return True

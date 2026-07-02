@@ -6,20 +6,50 @@ so the bot runs fine without it.
 from __future__ import annotations
 
 
+_TG_CHUNK = 4000  # stay under Telegram's 4096-char hard limit per message
+
+
+def _chunks(text: str, limit: int = _TG_CHUNK) -> list[str]:
+    """Split on the last newline inside each window so lines stay whole."""
+    out = []
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        cut = cut if cut > 0 else limit
+        out.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    if text:
+        out.append(text)
+    return out
+
+
 def send_telegram(token: str, chat_id: str, text: str) -> bool:
     if not token or not chat_id:
         return False
     try:
-        import requests
+        import time
 
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": text},
-            timeout=8,
-        )
-        return bool(getattr(r, "ok", False))
+        import requests
     except Exception:
         return False
+    ok = True
+    for chunk in _chunks(text):
+        sent = False
+        for attempt in range(2):  # one retry per chunk, then give up (fire-and-forget)
+            try:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    data={"chat_id": chat_id, "text": chunk},
+                    timeout=8,
+                )
+                if bool(getattr(r, "ok", False)):
+                    sent = True
+                    break
+            except Exception:
+                pass  # treat as a failed attempt; retry below
+            if attempt == 0:
+                time.sleep(1.0)
+        ok = ok and sent
+    return ok
 
 
 class Notifier:

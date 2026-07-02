@@ -108,6 +108,13 @@ class Settings(BaseSettings):
             )
         if self.mode == Mode.PAPER and not self.binance_testnet:
             raise ValueError("MODE=paper requires BINANCE_TESTNET=true.")
+        # cross-field sanity: values that are individually valid but mutually broken
+        if self.rsi_buy >= self.rsi_exit:
+            raise ValueError(f"RSI_BUY ({self.rsi_buy}) must be < RSI_EXIT ({self.rsi_exit})")
+        if self.donchian_exit > self.donchian_entry:
+            raise ValueError(
+                f"DONCHIAN_EXIT ({self.donchian_exit}) must be <= DONCHIAN_ENTRY ({self.donchian_entry})"
+            )
         return self
 
 

@@ -392,7 +392,7 @@ def _write_status_page(engine, symbols, path="docs/index.html"):
  <div class="sub">Son yenilənmə · last update: {now} · hər saat yenilənir / updates hourly</div>
  <div class="card">
    <div><span class="eq">${eq:,.2f}</span><span class="ret {rcls}">{ret:+.2f}%</span></div>
-   <div class="k">Boş / free cash: ${cash:,.2f} · trades: {len(engine.trades)} · open: {len(engine.positions)}</div>
+   <div class="k">Boş / free cash: ${cash:,.2f} · trades: {max(getattr(engine, "trades_total", 0), len(engine.trades))} · open: {len(engine.positions)}</div>
  </div>
  <div class="card"><h3 style="margin:0 0 8px;font-size:14px">Pozisiyalar / positions</h3>
    <table><thead><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Mark</th><th>PnL</th></tr></thead>
@@ -410,20 +410,29 @@ def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, log
     if not args.reset and engine.load():
         logger.info(f"Resumed state: equity {engine.equity():,.2f}, {len(engine.positions)} open positions")
     ev_before = len(engine.events)
+    ok = 0
     for s in symbols:
         try:
             df = fetcher.fetch_latest(s, timeframe, warmup + 5)
             engine.step(s, df)
+            ok += 1
         except Exception as e:
             logger.warning(f"{s}: {e}")
     engine.save()
+    if symbols and ok == 0:
+        # every fetch failed -> the run did nothing; fail LOUDLY (non-zero exit trips the
+        # workflow's failure alert) and leave the status page stale so it looks stale
+        logger.error("ALL symbols failed to fetch — treating run as FAILED")
+        if notifier.enabled:
+            notifier.notify("🛑 TradeBot: bütün coinlər üçün data alınmadı / ALL symbols failed to fetch — run FAILED")
+        raise SystemExit(1)
     try:
         _write_status_page(engine, symbols)  # static page for free GitHub Pages
     except Exception as e:
         logger.warning(f"status page: {e}")
     eq = engine.equity()
     logger.info(f"Run complete: equity {eq:,.2f} ({engine.total_return()*100:+.2f}%) · "
-                f"{len(engine.positions)} open · {len(engine.trades)} trades total")
+                f"{len(engine.positions)} open · {max(getattr(engine, 'trades_total', 0), len(engine.trades))} trades total")
     if notifier.enabled:
         for e in list(engine.events)[ev_before:]:  # alert on any open/close this run, with balance
             if any(k in e for k in ("BUY", "SHORT", "SELL", "COVER", "LIQUIDATED")):

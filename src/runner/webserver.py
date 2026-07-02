@@ -73,7 +73,7 @@ class Monitor:
                 "cash": round(e.cash, 2),
                 "realized_pnl": round(e.realized_pnl, 2),
                 "unrealized": round(e.unrealized(), 2),
-                "trades": len(trades),
+                "trades": max(getattr(e, "trades_total", 0), len(trades)),  # lifetime count survives restarts
                 "wins": wins,
                 "losses": losses,
                 "fees_total": round(fees, 4),
@@ -101,6 +101,8 @@ class Monitor:
                         "liq": round(p.liq, 2) if (p and e.leverage > 1) else None,
                         "unrealized": round(p.unrealized(mark), 2) if p else 0.0,
                         "roe": round(p.roe(mark) * 100, 1) if p else None,
+                        # if margin_ratio is ever added here: it can be inf (wiped equity) — emit "LIQ", json rejects inf
+
                         "pending": pend_disp,
                         "signal": (sig.action.value if sig else None),
                         "reason": (sig.reason if sig else None),

@@ -57,3 +57,9 @@ jobs:
           git add runtime_state.json docs/index.html || true
           git commit -m "state + status update [skip ci]" || echo "no change"
           git push || echo "nothing to push"
+      - name: Alert Telegram on failure
+        if: failure()   # any earlier step failed (pip, data, corrupt state, push) -> say so
+        run: |
+          curl -sf -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            --data-urlencode chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode text="🛑 TradeBot hourly run FAILED: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true

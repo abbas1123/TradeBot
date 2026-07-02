@@ -11,11 +11,17 @@ _STABLE_BASES = {
     "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "USDD", "EUR", "GBP", "AEUR",
     "USDT", "PAXG", "WBTC", "WBETH", "USD1", "USDE", "GUSD", "EURI", "XUSD",
 }
-_LEVERAGED_HINTS = ("UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S")
+_LEV_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S")
+# real coins that would otherwise match a leveraged suffix (SYRUP ends with UP, etc.)
+_NOT_LEVERAGED = {"SYRUP", "JUP", "SUPER"}
 
 
 def _looks_leveraged(base: str) -> bool:
-    return any(base.endswith(h) or h in base for h in _LEVERAGED_HINTS)
+    # leveraged tokens are <coin><suffix> (BTCUP, ETHBULL, XRP3L) — require a coin-like
+    # prefix of >= 2 chars so JUP ("J"+"UP") and plain names never false-positive
+    if base in _NOT_LEVERAGED:
+        return False
+    return any(base.endswith(sfx) and len(base) - len(sfx) >= 2 for sfx in _LEV_SUFFIXES)
 
 
 def top_symbols(exchange, n: int = 20, quote: str = "USDT", exclude_stables: bool = True) -> list[str]:

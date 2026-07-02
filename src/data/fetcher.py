@@ -10,7 +10,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from loguru import logger
 
 OHLCV_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
 # earliest sensible BTC history floor (ms) when no `since` is given
@@ -63,7 +65,7 @@ class Fetcher:
         if cached is not None and not cached.empty:
             last_cached = int(cached["timestamp"].iloc[-1].timestamp() * 1000)
             if last_cached >= until - tf_ms:
-                return self._finalize(cached, since, until, tf_ms, drop_unclosed)
+                return self._finalize(cached, since, until, tf_ms, drop_unclosed, symbol)
             fetch_from = max(since, last_cached + tf_ms)
 
         rows: list[list] = []
@@ -88,7 +90,7 @@ class Fetcher:
         if use_cache and not merged.empty:
             # never persist a still-forming bar, or it gets frozen as a stale "closed" candle
             self._cache_save(symbol, timeframe, self._drop_forming(merged, tf_ms))
-        return self._finalize(merged, since, until, tf_ms, drop_unclosed)
+        return self._finalize(merged, since, until, tf_ms, drop_unclosed, symbol)
 
     def fetch_latest(self, symbol: str, timeframe: str, lookback_bars: int) -> pd.DataFrame:
         """Just enough recent CLOSED bars to compute indicators."""
@@ -166,22 +168,48 @@ class Fetcher:
         return df
 
     @staticmethod
-    def _finalize(df, since, until, tf_ms, drop_unclosed) -> pd.DataFrame:
+    def _validate(df: pd.DataFrame, tf_ms: int, symbol: str) -> pd.DataFrame:
+        """Drop provably-malformed bars; warn (only) on gaps — never fabricate candles."""
+        if df is None or df.empty:
+            return df
+        o, h, l, c = df["open"], df["high"], df["low"], df["close"]
+        good = (
+            (h >= np.maximum(o, c)) & (l <= np.minimum(o, c))
+            & (o > 0) & (h > 0) & (l > 0) & (c > 0)
+        )
+        n_bad = int((~good).sum())
+        if n_bad:
+            logger.warning(f"{symbol}: dropped {n_bad} malformed OHLC bar(s)")
+            df = df[good].reset_index(drop=True)
+        gaps = int((df["timestamp"].diff().dt.total_seconds().mul(1000.0) > tf_ms * 1.5).sum())
+        if gaps:
+            logger.warning(f"{symbol}: {gaps} gap(s) (missing bars) in the series")
+        return df
+
+    @staticmethod
+    def _finalize(df, since, until, tf_ms, drop_unclosed, symbol: str = "") -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame(columns=OHLCV_COLS)
         out = df.copy()
         lo = pd.to_datetime(since, unit="ms", utc=True)
         hi = pd.to_datetime(until, unit="ms", utc=True)
         out = out[(out["timestamp"] >= lo) & (out["timestamp"] <= hi)]
+        out = Fetcher._validate(out.reset_index(drop=True), tf_ms, symbol)
         if drop_unclosed:
             out = Fetcher._drop_forming(out, tf_ms)
         return out.reset_index(drop=True)
 
     def _cache_path(self, symbol: str, timeframe: str) -> Path | None:
+        """Cache key includes the exchange id — mixing exchanges must not share files.
+
+        NB: files written before this fix were always named BINANCE_*; if you ever
+        fetched with a non-binance EXCHANGE back then, that cache is ambiguous —
+        delete data_store/ohlcv or run once with --refresh-data."""
         if not self.cache_dir:
             return None
         safe = symbol.replace("/", "-")
-        return self.cache_dir / f"BINANCE_{safe}_{timeframe}.parquet"
+        ex_id = str(getattr(self.exchange, "id", "exchange") or "exchange").upper()
+        return self.cache_dir / f"{ex_id}_{safe}_{timeframe}.parquet"
 
     def _cache_load(self, symbol: str, timeframe: str) -> pd.DataFrame | None:
         path = self._cache_path(symbol, timeframe)

@@ -82,3 +82,16 @@ def test_broker_exit_bypasses_min_notional():
     appr = rm.approve_exit("BTC/USDT", 0.0001)
     fill = br.place_order(appr, 1.0)
     assert fill.status == "filled"
+
+
+def test_normalize_fill_partial_is_not_filled():
+    # documents current behavior: only closed/filled + filled>0 counts as done;
+    # a partially-filled/open order must NOT be treated as a completed fill
+    rm = RiskManager(_settings())
+    br = Broker(_settings(), rm)
+    order = rm.approve_exit("BTC/USDT", 1.0)
+    full = br._normalize_fill({"filled": 1.0, "average": 100.0, "status": "closed", "fee": {"cost": 0.1}}, order)
+    assert full.status == "filled" and full.fee == 0.1 and full.cost == 100.0
+    part = br._normalize_fill({"filled": 0.4, "average": 100.0, "status": "open"}, order)
+    assert part.status != "filled"
+    assert part.filled_qty == 0.4

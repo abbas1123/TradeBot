@@ -63,12 +63,15 @@ def roe(side: str, entry: float, qty: float, mark: float, im: float) -> float:
 
 
 def margin_ratio(side: str, entry: float, qty: float, mark: float, im: float, notional: float | None = None) -> float:
-    """maintenance_margin / margin_balance. Liquidation triggers as this approaches 1."""
+    """maintenance_margin / margin_balance. Liquidation triggers as this approaches 1.
+
+    Wiped-out equity (<= 0) returns inf — strictly past liquidation, not "exactly at it".
+    Callers that serialize this to JSON must map non-finite values themselves."""
     notional = notional if notional is not None else entry * qty
     mmr, amt = maint_bracket(notional)
     mm = notional * mmr - amt
     equity = im + unrealized_pnl(side, entry, qty, mark)
-    return mm / equity if equity > 0 else 1.0
+    return mm / equity if equity > 0 else float("inf")
 
 
 def funding_per_bar(notional: float, funding_rate_8h: float, bar_hours: float) -> float:
