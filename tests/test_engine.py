@@ -178,3 +178,14 @@ def test_load_corrupt_state_backs_up_and_raises(tmp_path):
     with pytest.raises(RuntimeError):
         eng.load()
     assert list(tmp_path.glob("state.json.corrupt-*"))  # forensic backup left behind
+
+
+def test_update_mark_triggers_stop_between_bars():
+    """Real-time mark update must enforce the stop without waiting for the next bar close
+    (this is what lets an hourly cron protect leveraged positions on 1d signals)."""
+    eng = _engine()
+    _long(eng, entry=100.0, stop=96.0)
+    eng.cash -= 33.3
+    eng.update_mark("X/USDT", 95.0)  # live tick through the stop
+    assert "X/USDT" not in eng.positions
+    assert eng.trades[-1].exit_reason == "stop"

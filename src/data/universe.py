@@ -10,6 +10,7 @@ from __future__ import annotations
 _STABLE_BASES = {
     "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "USDD", "EUR", "GBP", "AEUR",
     "USDT", "PAXG", "WBTC", "WBETH", "USD1", "USDE", "GUSD", "EURI", "XUSD",
+    "PYUSD", "RLUSD", "USDG", "USDS", "EURC", "EURT", "EURQ", "EURR", "USDQ",
 }
 _LEV_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S")
 # real coins that would otherwise match a leveraged suffix (SYRUP ends with UP, etc.)

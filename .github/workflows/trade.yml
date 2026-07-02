@@ -46,10 +46,16 @@ jobs:
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           EOF
       - name: Run one keyless iteration (public prices)
+        # Config chosen by backtest (18mo + 3.5y, 8-major basket, 3x):
+        #   donchian_futures/1d/3x  -> +46%/3.5y, Sharpe 1.03, maxDD -13.7%, 0 liq
+        #   (1h configs bleed to death on fees: regime/1h/3x was -88.7%)
+        # --symbols auto scans the WHOLE exchange (top-40 by 24h volume, recomputed hourly);
+        # 1d signals, but this hourly run enforces stops/liquidation in real time.
         run: >
           python main.py --mode serve --source live --once
-          --symbols "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,ADA/USDT,DOGE/USDT,LTC/USDT,LINK/USDT"
-          --timeframe 1h --capital 1000 --strategy donchian --state runtime_state.json
+          --symbols auto --top 40
+          --timeframe 1d --leverage 3 --capital 1000
+          --strategy donchian_futures --state runtime_state.json
       - name: Persist state back to the repo
         run: |
           git config user.name "tradebot"

@@ -92,11 +92,16 @@ class Fetcher:
             self._cache_save(symbol, timeframe, self._drop_forming(merged, tf_ms))
         return self._finalize(merged, since, until, tf_ms, drop_unclosed, symbol)
 
-    def fetch_latest(self, symbol: str, timeframe: str, lookback_bars: int) -> pd.DataFrame:
-        """Just enough recent CLOSED bars to compute indicators."""
+    def fetch_latest(self, symbol: str, timeframe: str, lookback_bars: int,
+                     drop_unclosed: bool = True) -> pd.DataFrame:
+        """Just enough recent CLOSED bars to compute indicators.
+
+        drop_unclosed=False keeps the still-forming bar too — its close is the freshest
+        price, used for real-time stop checks between bar closes (never for signals)."""
         tf_ms = self.exchange.parse_timeframe(timeframe) * 1000
         since = _now_ms() - (lookback_bars + 2) * tf_ms
-        return self.fetch_ohlcv(symbol, timeframe, since=since, use_cache=False)
+        return self.fetch_ohlcv(symbol, timeframe, since=since, use_cache=False,
+                                drop_unclosed=drop_unclosed)
 
     # --- account ---------------------------------------------------------
     def fetch_balance(self) -> dict:

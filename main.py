@@ -404,17 +404,35 @@ def _write_status_page(engine, symbols, path="docs/index.html"):
     Path(path).write_text(html, encoding="utf-8")
 
 
-def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger):
+def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger,
+                settings=None, strat_name=None):
     """One keyless pass over the basket (GitHub Actions / cron): resume saved state, step each
-    coin on its latest CLOSED bar using public price data (no API keys), persist, report, exit."""
+    coin on its latest CLOSED bar using public price data (no API keys), persist, report, exit.
+
+    Signals use CLOSED bars only; the still-forming bar's close additionally drives a
+    real-time stop/liquidation check (update_mark), so an hourly cron enforces stops
+    between e.g. daily bar closes — essential with leverage."""
     if not args.reset and engine.load():
         logger.info(f"Resumed state: equity {engine.equity():,.2f}, {len(engine.positions)} open positions")
+    # auto-universe safety: a coin that dropped out of today's top-N but still has an open
+    # position must keep being managed (stops/exits) — never orphaned
+    orphans = [s for s in engine.positions if s not in symbols]
+    if orphans:
+        symbols = list(symbols) + orphans
+        logger.info(f"managing {len(orphans)} open position(s) outside today's universe: {', '.join(orphans)}")
+    if settings is not None and strat_name:
+        for s in symbols:
+            if s not in engine.strategies:
+                engine.strategies[s] = get_strategy(strat_name, settings)
     ev_before = len(engine.events)
     ok = 0
+    tf_ms = fetcher.exchange.parse_timeframe(timeframe) * 1000
     for s in symbols:
         try:
-            df = fetcher.fetch_latest(s, timeframe, warmup + 5)
-            engine.step(s, df)
+            raw = fetcher.fetch_latest(s, timeframe, warmup + 5, drop_unclosed=False)
+            engine.step(s, Fetcher._drop_forming(raw, tf_ms))  # signals on CLOSED bars only
+            if raw is not None and not raw.empty:
+                engine.update_mark(s, float(raw["close"].iloc[-1]))  # live stop/liq enforcement
             ok += 1
         except Exception as e:
             logger.warning(f"{s}: {e}")
@@ -435,7 +453,8 @@ def _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, log
                 f"{len(engine.positions)} open · {max(getattr(engine, 'trades_total', 0), len(engine.trades))} trades total")
     if notifier.enabled:
         for e in list(engine.events)[ev_before:]:  # alert on any open/close this run, with balance
-            if any(k in e for k in ("BUY", "SHORT", "SELL", "COVER", "LIQUIDATED")):
+            # every fill line (open or close) contains "qty @ price"; skip/info lines don't
+            if "@" in e and "skip" not in e:
                 notifier.notify(f"🔔 Əməliyyat / Trade:\n{e}\n💰 Balans / Equity: {eq:,.2f} USDT")
         rows = []
         for sym in symbols:
@@ -474,7 +493,8 @@ def run_serve(settings, args, logger):
     notifier = Notifier(settings)
 
     if args.once:  # keyless single pass (GitHub Actions / cron): step each coin once, persist, report, exit
-        _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger)
+        _serve_once(engine, symbols, fetcher, timeframe, warmup, notifier, args, logger,
+                    settings=settings, strat_name=strat_name)
         return
 
     info = {"strategy": strat_name, "timeframe": timeframe, "mode": f"serve/{args.source}", "status": "starting..."}
